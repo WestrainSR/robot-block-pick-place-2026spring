@@ -5,6 +5,7 @@
 
 # Runtime/probe logs produced during robot deployment
 *.log
+logs/
 
 # Local snapshot of factory source used only for inspection.
 # The robot keeps the original factory packages; this snapshot is not required
@@ -23,6 +24,8 @@ log/
 # versioned with Git LFS only when intentionally needed.
 datasets/
 runs/
+reports/
+deployment/competition_blocks_openvino/
 *_openvino_model/
 *.pt
 *.onnx
