@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'competition_node = competition_pick_place.competition_node:main',
+            'capture_dataset = competition_pick_place.capture_dataset:main',
         ],
     },
 )

@@ -6,6 +6,8 @@
 - 闭环控制 ROS2 包：`competition_pick_place/`
 - 现场照片：根目录下 `IMG_*.jpg` 与参考图片
 - 执行记录与交接说明：`docs/闭环控制执行记录.md`、`docs/项目交接文档.md`
+- 方块识别训练流程：`docs/方块识别网络训练流程.md`
+- 采集脚本：`ros2 run competition_pick_place capture_dataset`
 
 ## 当前状态
 
@@ -21,6 +23,16 @@
 
 - 机器人上尚未部署四类方块 YOLO OpenVINO 模型 `competition_blocks.xml/bin`。
 - 比赛场地导航点仍是占位坐标，需要现场标定。
+
+训练网络时先看 `docs/方块识别网络训练流程.md`。采集图像的基本命令：
+
+```bash
+ros2 run competition_pick_place capture_dataset --ros-args \
+  -p class_name:=grass \
+  -p scene_name:=single_block \
+  -p count:=150 \
+  -p output_dir:=/home/ubuntu/datasets/block_dataset/raw
+```
 
 ## 核心命令
 

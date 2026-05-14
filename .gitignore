@@ -19,6 +19,16 @@ install/
 log/
 .pytest_cache/
 
+# Training data and model artifacts are large and should be transferred or
+# versioned with Git LFS only when intentionally needed.
+datasets/
+runs/
+*_openvino_model/
+*.pt
+*.onnx
+*.engine
+*.bin
+
 # Editor and OS noise
 .vscode/
 .idea/
