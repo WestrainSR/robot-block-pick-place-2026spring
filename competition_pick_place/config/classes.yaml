@@ -1,0 +1,11 @@
+classes:
+  - redstone
+  - glass
+  - glowstone
+  - grass
+
+aliases:
+  redstone: [redstone]
+  glass: [glass]
+  glowstone: [glowstone]
+  grass: [grass]

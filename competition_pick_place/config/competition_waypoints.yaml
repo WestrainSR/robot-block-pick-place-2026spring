@@ -1,0 +1,26 @@
+# Replace these values after RViz/Nav2 calibration on the competition field.
+# Material and place standoff may not remain [0, 0] for a real run.
+start_pose:
+  x: 0.0
+  y: 0.0
+  yaw: 0.0
+
+material_standoff_pose:
+  x: 0.0
+  y: 0.0
+  yaw: 0.0
+
+place_standoff_pose:
+  x: 0.0
+  y: 0.0
+  yaw: 0.0
+
+return_pose:
+  x: 0.0
+  y: 0.0
+  yaw: 0.0
+
+arm:
+  init_action: navigation_pick_init
+  pick_action: navigation_pick
+  place_action: navigation_place
