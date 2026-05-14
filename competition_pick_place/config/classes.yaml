@@ -1,11 +1,9 @@
 classes:
-  - redstone
-  - glass
-  - glowstone
-  - grass
+  - red
+  - green
+  - blue
 
 aliases:
-  redstone: [redstone]
-  glass: [glass]
-  glowstone: [glowstone]
-  grass: [grass]
+  red: [red, hong, red_block]
+  green: [green, lv, green_block]
+  blue: [blue, lan, blue_block]

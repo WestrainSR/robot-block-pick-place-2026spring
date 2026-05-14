@@ -69,7 +69,7 @@ class Detection:
 
 
 class CompetitionPickPlace(Node):
-    VALID_TARGETS = {'redstone', 'glass', 'glowstone', 'grass'}
+    VALID_TARGETS = {'red', 'green', 'blue'}
 
     def __init__(self) -> None:
         super().__init__(
@@ -85,7 +85,7 @@ class CompetitionPickPlace(Node):
         self.last_msg_time = 0.0
 
         share_dir = get_package_share_directory('competition_pick_place')
-        self.declare_parameter('target_class', 'grass')
+        self.declare_parameter('target_class', 'red')
         self.declare_parameter('target_aliases', '')
         self.declare_parameter('place_class', '')
         self.declare_parameter('dry_run', True)

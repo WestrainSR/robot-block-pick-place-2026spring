@@ -4,7 +4,7 @@ import random
 import shutil
 from pathlib import Path
 
-CLASSES = ['redstone', 'glass', 'glowstone', 'grass']
+CLASSES = ['red', 'green', 'blue']
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp'}
 
 

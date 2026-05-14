@@ -63,7 +63,7 @@ def launch_setup(context):
         output='screen',
         condition=IfCondition(start_yolo),
         parameters=[
-            {'classes': ['redstone', 'glass', 'glowstone', 'grass']},
+            {'classes': ['red', 'green', 'blue']},
             {'model': yolo_model, 'conf': ParameterValue(yolo_conf, value_type=float), 'start': True},
         ],
     )
@@ -102,7 +102,7 @@ def generate_launch_description():
         'competition_waypoints.yaml',
     )
     return LaunchDescription([
-        DeclareLaunchArgument('target_class', default_value='grass'),
+        DeclareLaunchArgument('target_class', default_value='red'),
         DeclareLaunchArgument('target_aliases', default_value=''),
         DeclareLaunchArgument('place_class', default_value=''),
         DeclareLaunchArgument('dry_run', default_value='true'),

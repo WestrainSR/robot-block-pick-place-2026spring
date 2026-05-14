@@ -7,7 +7,8 @@
 - 现场照片：根目录下 `IMG_*.jpg` 与参考图片
 - 执行记录与交接说明：`docs/闭环控制执行记录.md`、`docs/项目交接文档.md`
 - 方块识别训练流程：`docs/方块识别网络训练流程.md`
-- 采集脚本：`ros2 run competition_pick_place capture_dataset`
+- 本地采集 UI：`tools/color_block_capture_ui.py`
+- 机器人采集脚本：`ros2 run competition_pick_place capture_dataset`
 
 ## 当前状态
 
@@ -21,14 +22,26 @@
 
 未直接实跑 `dry_run:=false` 的原因：
 
-- 机器人上尚未部署四类方块 YOLO OpenVINO 模型 `competition_blocks.xml/bin`。
+- 机器人上尚未部署红/绿/蓝三类方块 YOLO OpenVINO 模型 `competition_blocks.xml/bin`。
 - 比赛场地导航点仍是占位坐标，需要现场标定。
 
-训练网络时先看 `docs/方块识别网络训练流程.md`。采集图像的基本命令：
+训练网络时先看 `docs/方块识别网络训练流程.md`。优先使用本地采集 UI：
+
+```powershell
+python tools/color_block_capture_ui.py --port 8765
+```
+
+然后打开：
+
+```text
+http://127.0.0.1:8765
+```
+
+如果只想在机器人 ROS2 终端里直接采图，也可以用命令行：
 
 ```bash
 ros2 run competition_pick_place capture_dataset --ros-args \
-  -p class_name:=grass \
+  -p class_name:=red \
   -p scene_name:=single_block \
   -p count:=150 \
   -p output_dir:=/home/ubuntu/datasets/block_dataset/raw
@@ -44,7 +57,7 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 
 ros2 launch competition_pick_place competition_run.launch.py \
-  target_class:=grass \
+  target_class:=red \
   dry_run:=false \
   start_navigation:=true \
   start_yolo:=true \
@@ -55,10 +68,9 @@ ros2 launch competition_pick_place competition_run.launch.py \
 抽签目标只需要替换 `target_class`：
 
 ```bash
-target_class:=redstone
-target_class:=glass
-target_class:=glowstone
-target_class:=grass
+target_class:=red
+target_class:=green
+target_class:=blue
 ```
 
 ## 安全说明

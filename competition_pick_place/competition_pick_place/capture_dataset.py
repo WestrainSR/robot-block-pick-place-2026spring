@@ -15,7 +15,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 
 
-VALID_CLASSES = {'redstone', 'glass', 'glowstone', 'grass', 'mixed', 'background'}
+VALID_CLASSES = {'red', 'green', 'blue', 'mixed', 'background'}
 
 
 def safe_name(value: str) -> str:
