@@ -205,34 +205,31 @@ class CaptureStore:
     def recommendation(self):
         counts = self.counts()
         class_ids = [c['id'] for c in CLASSES]
-        best = None
         for scene in SCENES:
             if scene['mode'] == 'mixed':
-                deficit = scene['target_global'] - counts['mixed_count']
-                score = deficit / max(1, scene['target_global'])
-                candidate = {
-                    'scene_id': scene['id'],
-                    'class_id': 'mixed',
-                    'score': score,
-                    'deficit': deficit,
-                }
-                if deficit > 0 and (best is None or candidate['score'] > best['score']):
-                    best = candidate
+                target = scene['target_global']
+                have = counts['mixed_count']
+                if have < target:
+                    return {
+                        'scene_id': scene['id'],
+                        'class_id': 'mixed',
+                        'have': have,
+                        'target': target,
+                        'deficit': target - have,
+                    }
                 continue
             for cls in class_ids:
                 have = counts['classes'][cls]['scenes'][scene['id']]
                 target = scene['target_per_class']
-                deficit = target - have
-                score = deficit / max(1, target)
-                candidate = {
-                    'scene_id': scene['id'],
-                    'class_id': cls,
-                    'score': score,
-                    'deficit': deficit,
-                }
-                if deficit > 0 and (best is None or candidate['score'] > best['score']):
-                    best = candidate
-        return best or {'scene_id': SCENES[-1]['id'], 'class_id': 'mixed', 'score': 0, 'deficit': 0}
+                if have < target:
+                    return {
+                        'scene_id': scene['id'],
+                        'class_id': cls,
+                        'have': have,
+                        'target': target,
+                        'deficit': target - have,
+                    }
+        return {'scene_id': SCENES[-1]['id'], 'class_id': 'mixed', 'have': counts['mixed_count'], 'target': 0, 'deficit': 0}
 
     def save_image(self, image_bytes, class_id, scene_id, note=''):
         scene = scene_by_id(scene_id)
@@ -811,20 +808,35 @@ INDEX_HTML = r'''<!doctype html>
       const scene = sceneInfo(activeScene);
       const cls = classInfo(activeClass);
       if (!scene || !cls) return;
+      const progress = taskProgress(activeClass, activeScene);
+      const progressText = `<br><strong>当前小任务进度：${progress.have}/${progress.target}，还差 ${Math.max(0, progress.target - progress.have)}</strong>`;
       if (scene.mode === 'mixed') {
-        $('guide').innerHTML = `<strong>现在摆放：红、绿、蓝三块同时入镜</strong><br>${scene.guide}`;
+        $('guide').innerHTML = `<strong>现在摆放：红、绿、蓝三块同时入镜</strong><br>${scene.guide}${progressText}`;
       } else {
-        $('guide').innerHTML = `<strong>现在摆放：${cls.name}</strong><br>${scene.guide}`;
+        $('guide').innerHTML = `<strong>现在摆放：${cls.name}</strong><br>${scene.guide}${progressText}`;
       }
     }
 
-    function applyRecommendation() {
+    function taskProgress(classId, sceneId) {
+      const scene = sceneInfo(sceneId);
+      if (!scene) return { have: 0, target: 0 };
+      if (scene.mode === 'mixed') {
+        return { have: state.counts.mixed_count, target: scene.target_global };
+      }
+      const classCounts = state.counts.classes[classId];
+      return {
+        have: classCounts ? (classCounts.scenes[sceneId] || 0) : 0,
+        target: scene.target_per_class
+      };
+    }
+
+    function applyRecommendation(message = '已切到推荐任务。') {
       const rec = state.recommendation;
       activeScene = rec.scene_id;
       if (rec.class_id !== 'mixed') activeClass = rec.class_id;
       renderChoices();
       updateGuide();
-      log('已切到推荐任务。');
+      log(message);
     }
 
     async function busy(button, work) {
@@ -868,6 +880,8 @@ INDEX_HTML = r'''<!doctype html>
       $('capture').textContent = '拍照中';
       const scene = sceneInfo(activeScene);
       const classId = scene.mode === 'mixed' ? 'mixed' : activeClass;
+      const capturedScene = activeScene;
+      const capturedClass = activeClass;
       log('正在拍照并保存到本地数据集。');
       const data = await api('/api/capture', {
         method: 'POST',
@@ -875,8 +889,16 @@ INDEX_HTML = r'''<!doctype html>
       });
       $('preview').innerHTML = `<img src="${data.image}" alt="captured">`;
       await loadState();
-      applyRecommendation();
-      log('已保存：' + data.saved.relative_path);
+      activeScene = capturedScene;
+      activeClass = capturedClass;
+      const progress = taskProgress(capturedClass, capturedScene);
+      if (progress.have >= progress.target) {
+        applyRecommendation(`小任务已完成：${progress.have}/${progress.target}。已自动切到下一个未完成任务。`);
+      } else {
+        renderChoices();
+        updateGuide();
+        log(`已保存：${data.saved.relative_path}。当前小任务 ${progress.have}/${progress.target}，继续拍这个任务。`);
+      }
     });
 
     $('autoNext').onclick = applyRecommendation;
