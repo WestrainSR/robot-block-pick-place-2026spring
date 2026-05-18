@@ -23,10 +23,12 @@ def launch_setup(context):
     peripherals_path = _package_path('peripherals')
 
     target_class = LaunchConfiguration('target_class')
+    target_sequence = LaunchConfiguration('target_sequence')
     target_aliases = LaunchConfiguration('target_aliases')
     place_class = LaunchConfiguration('place_class')
     dry_run = LaunchConfiguration('dry_run')
     exit_on_done = LaunchConfiguration('exit_on_done')
+    stop_after_pick = LaunchConfiguration('stop_after_pick')
     use_nav = LaunchConfiguration('use_nav')
     use_arm = LaunchConfiguration('use_arm')
     map_name = LaunchConfiguration('map_name')
@@ -37,6 +39,11 @@ def launch_setup(context):
     yolo_model = LaunchConfiguration('yolo_model')
     yolo_conf = LaunchConfiguration('yolo_conf')
     waypoints_yaml = LaunchConfiguration('waypoints_yaml')
+    search_timeout = LaunchConfiguration('search_timeout')
+    align_timeout = LaunchConfiguration('align_timeout')
+    pick_target_area_ratio = LaunchConfiguration('pick_target_area_ratio')
+    area_tolerance_ratio = LaunchConfiguration('area_tolerance_ratio')
+    max_linear_speed = LaunchConfiguration('max_linear_speed')
 
     navigation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(navigation_path, 'launch/navigation.launch.py')),
@@ -75,13 +82,20 @@ def launch_setup(context):
         parameters=[
             {
                 'target_class': target_class,
+                'target_sequence': target_sequence,
                 'target_aliases': target_aliases,
                 'place_class': place_class,
                 'dry_run': ParameterValue(dry_run, value_type=bool),
                 'exit_on_done': ParameterValue(exit_on_done, value_type=bool),
+                'stop_after_pick': ParameterValue(stop_after_pick, value_type=bool),
                 'use_nav': ParameterValue(use_nav, value_type=bool),
                 'use_arm': ParameterValue(use_arm, value_type=bool),
                 'waypoints_yaml': waypoints_yaml,
+                'search_timeout': ParameterValue(search_timeout, value_type=float),
+                'align_timeout': ParameterValue(align_timeout, value_type=float),
+                'pick_target_area_ratio': ParameterValue(pick_target_area_ratio, value_type=float),
+                'area_tolerance_ratio': ParameterValue(area_tolerance_ratio, value_type=float),
+                'max_linear_speed': ParameterValue(max_linear_speed, value_type=float),
             },
         ],
     )
@@ -103,10 +117,12 @@ def generate_launch_description():
     )
     return LaunchDescription([
         DeclareLaunchArgument('target_class', default_value='red'),
+        DeclareLaunchArgument('target_sequence', default_value=''),
         DeclareLaunchArgument('target_aliases', default_value=''),
         DeclareLaunchArgument('place_class', default_value=''),
         DeclareLaunchArgument('dry_run', default_value='true'),
         DeclareLaunchArgument('exit_on_done', default_value='false'),
+        DeclareLaunchArgument('stop_after_pick', default_value='false'),
         DeclareLaunchArgument('use_nav', default_value='true'),
         DeclareLaunchArgument('use_arm', default_value='true'),
         DeclareLaunchArgument('map_name', default_value='competition_map'),
@@ -117,5 +133,10 @@ def generate_launch_description():
         DeclareLaunchArgument('yolo_model', default_value='competition_blocks'),
         DeclareLaunchArgument('yolo_conf', default_value='0.70'),
         DeclareLaunchArgument('waypoints_yaml', default_value=default_waypoints),
+        DeclareLaunchArgument('search_timeout', default_value='18.0'),
+        DeclareLaunchArgument('align_timeout', default_value='24.0'),
+        DeclareLaunchArgument('pick_target_area_ratio', default_value='0.095'),
+        DeclareLaunchArgument('area_tolerance_ratio', default_value='0.018'),
+        DeclareLaunchArgument('max_linear_speed', default_value='0.10'),
         OpaqueFunction(function=launch_setup),
     ])

@@ -86,10 +86,12 @@ class CompetitionPickPlace(Node):
 
         share_dir = get_package_share_directory('competition_pick_place')
         self.declare_parameter('target_class', 'red')
+        self.declare_parameter('target_sequence', '')
         self.declare_parameter('target_aliases', '')
         self.declare_parameter('place_class', '')
         self.declare_parameter('dry_run', True)
         self.declare_parameter('exit_on_done', False)
+        self.declare_parameter('stop_after_pick', False)
         self.declare_parameter('use_nav', True)
         self.declare_parameter('use_arm', True)
         self.declare_parameter('waypoints_yaml', os.path.join(share_dir, 'config', 'competition_waypoints.yaml'))
@@ -121,8 +123,13 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('action_group_path', '/home/ubuntu/software/arm_pc/ActionGroups')
 
         self.target_class = str(self.get_parameter('target_class').value).strip()
+        self.target_sequence = self.parse_target_sequence(
+            self.get_parameter('target_sequence').value,
+            self.target_class,
+        )
         self.place_class = str(self.get_parameter('place_class').value).strip()
         self.dry_run = bool(self.get_parameter('dry_run').value)
+        self.stop_after_pick = bool(self.get_parameter('stop_after_pick').value)
         self.use_nav = bool(self.get_parameter('use_nav').value)
         self.use_arm = bool(self.get_parameter('use_arm').value)
         self.map_frame = str(self.get_parameter('map_frame').value)
@@ -130,8 +137,7 @@ class CompetitionPickPlace(Node):
         self.stale_seconds = float(self.get_parameter('detection_stale_seconds').value)
         self.stable_frames = int(self.get_parameter('stable_frames').value)
         self.waypoints = self.load_waypoints(str(self.get_parameter('waypoints_yaml').value))
-        self.target_names = set(self.parse_aliases(self.get_parameter('target_aliases').value))
-        self.target_names.add(self.target_class)
+        self.target_aliases = set(self.parse_aliases(self.get_parameter('target_aliases').value))
 
         self.cmd_pub = self.create_publisher(Twist, str(self.get_parameter('cmd_vel_topic').value), 1)
         self.create_subscription(
@@ -169,6 +175,21 @@ class CompetitionPickPlace(Node):
         if isinstance(value, str):
             return [part.strip() for part in value.split(',') if part.strip()]
         return [str(part).strip() for part in value if str(part).strip()]
+
+    def parse_target_sequence(self, value, fallback: str) -> List[str]:
+        if value is None:
+            return [fallback]
+        if isinstance(value, str):
+            targets = [part.strip() for part in value.split(',') if part.strip()]
+        else:
+            targets = [str(part).strip() for part in value if str(part).strip()]
+        return targets or [fallback]
+
+    def target_names_for(self, target: str) -> set:
+        names = {target}
+        if len(self.target_sequence) == 1:
+            names.update(self.target_aliases)
+        return names
 
     def load_waypoints(self, path: str) -> dict:
         with open(path, 'r', encoding='utf-8') as f:
@@ -216,41 +237,52 @@ class CompetitionPickPlace(Node):
 
     def run_task(self) -> None:
         try:
-            self.set_phase(Phase.INIT, f'target={self.target_class}, dry_run={self.dry_run}')
-            self.validate_target()
+            self.set_phase(Phase.INIT, f'targets={self.target_sequence}, dry_run={self.dry_run}')
+            self.validate_targets()
             self.wait_for_systems()
             self.run_action_group(str(self.get_parameter('init_action').value), 'arm init')
 
-            self.set_phase(Phase.NAV_TO_MATERIAL, 'going to material standoff')
-            self.navigate_to('material_standoff_pose')
+            total = len(self.target_sequence)
+            for index, target in enumerate(self.target_sequence, 1):
+                self.target_class = target
+                target_names = self.target_names_for(target)
+                prefix = f'[{index}/{total}] {target}'
 
-            self.set_phase(Phase.SEARCH_TARGET, f'searching {sorted(self.target_names)}')
-            self.align_to_classes(
-                names=self.target_names,
-                timeout=float(self.get_parameter('align_timeout').value),
-                target_area=float(self.get_parameter('pick_target_area_ratio').value),
-                label='pick target',
-            )
+                self.set_phase(Phase.NAV_TO_MATERIAL, f'{prefix}: going to material standoff')
+                self.navigate_to('material_standoff_pose')
 
-            self.set_phase(Phase.PICK, 'running pick action group')
-            self.run_action_group(str(self.get_parameter('pick_action').value), 'pick')
-
-            self.set_phase(Phase.NAV_TO_PLACE, 'going to place standoff')
-            self.navigate_to('place_standoff_pose')
-
-            if self.place_class:
-                self.set_phase(Phase.ALIGN_PLACE, f'aligning place marker {self.place_class}')
+                self.set_phase(Phase.SEARCH_TARGET, f'{prefix}: searching {sorted(target_names)}')
                 self.align_to_classes(
-                    names={self.place_class},
-                    timeout=float(self.get_parameter('place_align_timeout').value),
-                    target_area=float(self.get_parameter('place_target_area_ratio').value),
-                    label='place marker',
+                    names=target_names,
+                    timeout=float(self.get_parameter('align_timeout').value),
+                    target_area=float(self.get_parameter('pick_target_area_ratio').value),
+                    label=f'{target} pick target',
                 )
-            else:
-                self.get_logger().warn('place_class is empty; placement uses Nav2 standoff plus calibrated action group')
 
-            self.set_phase(Phase.PLACE, 'running place action group')
-            self.run_action_group(str(self.get_parameter('place_action').value), 'place')
+                self.set_phase(Phase.PICK, f'{prefix}: running pick action group')
+                self.run_action_group(str(self.get_parameter('pick_action').value), f'{target} pick')
+                if self.stop_after_pick:
+                    self.stop_robot()
+                    self.set_phase(Phase.DONE, f'{prefix}: stop_after_pick=true')
+                    self.shutdown_if_requested()
+                    return
+
+                self.set_phase(Phase.NAV_TO_PLACE, f'{prefix}: going to place standoff')
+                self.navigate_to('place_standoff_pose')
+
+                if self.place_class:
+                    self.set_phase(Phase.ALIGN_PLACE, f'{prefix}: aligning place marker {self.place_class}')
+                    self.align_to_classes(
+                        names={self.place_class},
+                        timeout=float(self.get_parameter('place_align_timeout').value),
+                        target_area=float(self.get_parameter('place_target_area_ratio').value),
+                        label='place marker',
+                    )
+                else:
+                    self.get_logger().warn('place_class is empty; placement uses Nav2 standoff plus calibrated action group')
+
+                self.set_phase(Phase.PLACE, f'{prefix}: running place action group')
+                self.run_action_group(str(self.get_parameter('place_action').value), f'{target} place')
 
             self.set_phase(Phase.NAV_HOME, 'returning home')
             self.navigate_to('return_pose')
@@ -263,9 +295,10 @@ class CompetitionPickPlace(Node):
             self.set_phase(Phase.FAILSAFE, str(exc))
             self.shutdown_if_requested()
 
-    def validate_target(self) -> None:
-        if self.target_class not in self.VALID_TARGETS:
-            raise RuntimeError(f'target_class must be one of {sorted(self.VALID_TARGETS)}, got {self.target_class!r}')
+    def validate_targets(self) -> None:
+        invalid = [target for target in self.target_sequence if target not in self.VALID_TARGETS]
+        if invalid:
+            raise RuntimeError(f'targets must be in {sorted(self.VALID_TARGETS)}, got {invalid!r}')
         if not self.dry_run and self.use_nav:
             for name in ('material_standoff_pose', 'place_standoff_pose', 'return_pose'):
                 pose = self.waypoints.get(name)
@@ -335,14 +368,17 @@ class CompetitionPickPlace(Node):
         align_deadline = time.monotonic() + timeout
         stable = 0
         last_log = 0.0
+        found_once = False
 
         while rclpy.ok() and not self.shutdown_requested:
             det = self.best_detection(names)
             now = time.monotonic()
             if det is None:
                 stable = 0
-                if now > found_deadline:
+                if not found_once and now > found_deadline:
                     raise RuntimeError(f'{label} not found before search timeout')
+                if found_once and now > align_deadline:
+                    raise RuntimeError(f'{label} alignment timeout after temporary target loss')
                 self.publish_search_twist()
                 if now - last_log > 1.5:
                     self.get_logger().info(f'searching {label}; detections={self.visible_classes()}')
@@ -350,6 +386,7 @@ class CompetitionPickPlace(Node):
                 time.sleep(0.08)
                 continue
 
+            found_once = True
             if now > align_deadline:
                 raise RuntimeError(f'{label} alignment timeout')
 
