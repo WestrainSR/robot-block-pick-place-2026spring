@@ -16,6 +16,7 @@
    - 读取原厂 `navigation_pick_ai.d6a` 中的动作步。
    - 只执行第 1、2 步作为下探/张爪。
    - 下探动作进行的同时继续运行视觉控制，而不是等待动作结束。
+   - 第 1、2 步是机械臂动作组步号，不是 MPC 只规划两次；MPC 会在动作持续时间内按控制周期反复重算。
 4. 闭爪和抬升
    - 执行 `navigation_pick_ai.d6a` 第 3、4 步闭爪。
    - 执行第 5、6 步抬升。
@@ -65,27 +66,33 @@ area_error
 ```text
 linear.x  candidates = [-vmax, -0.5vmax, 0, 0.5vmax, vmax]
 angular.z candidates = [-wmax, -0.5wmax, 0, 0.5wmax, wmax]
-horizon = 6
-dt = 0.12
+visual_servo_period = 0.06
+horizon = 10
+dt = 0.06
 ```
 
-每个检测周期重新求一次最低代价控制量，因此是 receding-horizon MPC。
+默认控制周期约 `0.06s`，也就是约 `16.7Hz`；`tools/run_green_pick.py` 的实机绿色抓取脚本使用 `visual_servo_period=0.05`，约 `20Hz`。
+
+每个控制周期都会读取最新检测并重新求一次最低代价控制量，因此是 receding-horizon MPC。日志为了避免刷屏会降频打印，所以日志条数不能代表 MPC 求解次数。
+
+`horizon * dt` 是预测窗口。当前默认 `10 * 0.06 = 0.60s`；实机绿色脚本是 `10 * 0.05 = 0.50s`。相比旧配置 `6 * 0.12 = 0.72s`，新配置的预测步长更接近实际控制周期，输出会更细、更及时。
 
 ## 低位视觉限制
 
-实测发现，夹爪下探到低位后，相机会出现目标不可见或被夹爪遮挡的情况。因此当前策略是：
-
-```text
-pick_preclose_required:=false
-```
-
-也就是在“下探过程中可见的最后窗口”完成 MPC 修正，然后立即闭爪。若后续调整相机或姿态，使低位也能稳定看见方块，可以改为：
+实测发现，夹爪下探到低位后，相机会出现目标不可见或被夹爪遮挡的情况。因此绿色实机脚本当前策略是：
 
 ```text
 pick_preclose_required:=true
+pick_preclose_fail_on_timeout:=false
 ```
 
-这样会在闭爪前再次等待低位视觉稳定。
+也就是闭爪前做一次短暂确认：如果低位仍能看到目标，就继续 MPC 对准；如果目标被夹爪遮挡或短时间内丢失，则停车并继续闭爪，不把整次任务判失败。若后续调整相机或姿态，使低位也能稳定看见方块，可以改为：
+
+```text
+pick_preclose_fail_on_timeout:=true
+```
+
+这样会在闭爪前强制等待低位视觉稳定。
 
 ## 当前绿色抓取参数
 
@@ -104,18 +111,24 @@ pick_action=navigation_pick_ai
 control_mode=mpc
 closed_loop_pick=true
 pick_pregrasp_visual_servo=true
-pick_preclose_required=false
+pick_preclose_required=true
+pick_preclose_fail_on_timeout=false
 desired_center_x_ratio=0.50
 pick_target_area_ratio=0.042
 pick_preclose_center_x_ratio=0.90
 pick_preclose_target_area_ratio=0.073
 max_linear_speed=0.06
 max_angular_speed=0.20
+visual_servo_period=0.05
+pick_pregrasp_time_scale=1.6
+pick_pregrasp_min_step_seconds=0.45
+mpc_horizon=10
+mpc_dt=0.05
 ```
 
-## 最近一次实机日志结论
+## 调参前实机日志结论
 
-最近一次运行结果：
+调参前的一次运行结果：
 
 ```text
 run_status=done

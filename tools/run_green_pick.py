@@ -20,16 +20,30 @@ def parse_args():
     parser.add_argument('--stable-frames', type=int, default=4)
     parser.add_argument('--control-mode', default='mpc', choices=['p', 'mpc'])
     parser.add_argument('--closed-loop-pick', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--pick-visual-servo-timeout', type=float, default=12.0)
+    parser.add_argument('--pick-visual-servo-timeout', type=float, default=3.0)
+    parser.add_argument('--visual-servo-period', type=float, default=0.05)
     parser.add_argument('--init-action', default='navigation_pick_init_ai')
     parser.add_argument('--pick-action', default='navigation_pick_ai')
     parser.add_argument('--pregrasp-visual-servo', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--preclose-required', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--pregrasp-time-scale', type=float, default=1.6)
+    parser.add_argument('--pregrasp-min-step-seconds', type=float, default=0.45)
+    parser.add_argument('--preclose-required', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--preclose-fail-on-timeout', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--preclose-center', type=float, default=0.90)
     parser.add_argument('--preclose-target-area', type=float, default=0.073)
     parser.add_argument('--preclose-center-tolerance', type=float, default=0.065)
     parser.add_argument('--preclose-area-tolerance', type=float, default=0.020)
     parser.add_argument('--preclose-stable-frames', type=int, default=1)
+    parser.add_argument('--mpc-horizon', type=int, default=10)
+    parser.add_argument('--mpc-dt', type=float, default=0.05)
+    parser.add_argument('--mpc-center-response', type=float, default=1.05)
+    parser.add_argument('--mpc-area-response', type=float, default=0.24)
+    parser.add_argument('--mpc-center-weight', type=float, default=8.0)
+    parser.add_argument('--mpc-area-weight', type=float, default=26.0)
+    parser.add_argument('--mpc-velocity-weight', type=float, default=0.08)
+    parser.add_argument('--mpc-delta-weight', type=float, default=0.16)
+    parser.add_argument('--mpc-terminal-weight', type=float, default=2.2)
+    parser.add_argument('--mpc-center-gate-ratio', type=float, default=0.10)
     return parser.parse_args()
 
 
@@ -82,8 +96,12 @@ ros2 launch competition_pick_place "$LAUNCH_FILE" \\
   control_mode:={shlex.quote(args.control_mode)} \\
   closed_loop_pick:={str(bool(args.closed_loop_pick)).lower()} \\
   pick_visual_servo_timeout:={args.pick_visual_servo_timeout:.1f} \\
+  visual_servo_period:={args.visual_servo_period:.3f} \\
   pick_pregrasp_visual_servo:={str(bool(args.pregrasp_visual_servo)).lower()} \\
+  pick_pregrasp_time_scale:={args.pregrasp_time_scale:.3f} \\
+  pick_pregrasp_min_step_seconds:={args.pregrasp_min_step_seconds:.3f} \\
   pick_preclose_required:={str(bool(args.preclose_required)).lower()} \\
+  pick_preclose_fail_on_timeout:={str(bool(args.preclose_fail_on_timeout)).lower()} \\
   pick_preclose_center_x_ratio:={args.preclose_center:.4f} \\
   pick_preclose_target_area_ratio:={args.preclose_target_area:.4f} \\
   pick_preclose_center_tolerance_ratio:={args.preclose_center_tolerance:.4f} \\
@@ -93,16 +111,16 @@ ros2 launch competition_pick_place "$LAUNCH_FILE" \\
   max_linear_speed:=0.06 \\
   max_angular_speed:=0.20 \\
   search_angular_speed:=0.12 \\
-  mpc_horizon:=6 \\
-  mpc_dt:=0.12 \\
-  mpc_center_response:=1.05 \\
-  mpc_area_response:=0.24 \\
-  mpc_center_weight:=8.0 \\
-  mpc_area_weight:=26.0 \\
-  mpc_velocity_weight:=0.08 \\
-  mpc_delta_weight:=0.16 \\
-  mpc_terminal_weight:=2.2 \\
-  mpc_center_gate_ratio:=0.10 > "$LOG" 2>&1 &
+  mpc_horizon:={int(args.mpc_horizon)} \\
+  mpc_dt:={args.mpc_dt:.3f} \\
+  mpc_center_response:={args.mpc_center_response:.3f} \\
+  mpc_area_response:={args.mpc_area_response:.3f} \\
+  mpc_center_weight:={args.mpc_center_weight:.3f} \\
+  mpc_area_weight:={args.mpc_area_weight:.3f} \\
+  mpc_velocity_weight:={args.mpc_velocity_weight:.3f} \\
+  mpc_delta_weight:={args.mpc_delta_weight:.3f} \\
+  mpc_terminal_weight:={args.mpc_terminal_weight:.3f} \\
+  mpc_center_gate_ratio:={args.mpc_center_gate_ratio:.3f} > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 echo "launch_pid=$LAUNCH_PID"
 

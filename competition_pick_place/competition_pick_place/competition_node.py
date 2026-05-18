@@ -114,8 +114,12 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('control_mode', 'p')
         self.declare_parameter('closed_loop_pick', False)
         self.declare_parameter('pick_visual_servo_timeout', 10.0)
+        self.declare_parameter('visual_servo_period', 0.06)
         self.declare_parameter('pick_pregrasp_visual_servo', True)
+        self.declare_parameter('pick_pregrasp_time_scale', 1.0)
+        self.declare_parameter('pick_pregrasp_min_step_seconds', 0.0)
         self.declare_parameter('pick_preclose_required', True)
+        self.declare_parameter('pick_preclose_fail_on_timeout', True)
         self.declare_parameter('pick_preclose_center_x_ratio', 0.50)
         self.declare_parameter('pick_preclose_target_area_ratio', -1.0)
         self.declare_parameter('pick_preclose_center_tolerance_ratio', -1.0)
@@ -131,8 +135,8 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('search_angular_speed', 0.22)
         self.declare_parameter('angular_sign', -1.0)
         self.declare_parameter('linear_sign', 1.0)
-        self.declare_parameter('mpc_horizon', 6)
-        self.declare_parameter('mpc_dt', 0.12)
+        self.declare_parameter('mpc_horizon', 10)
+        self.declare_parameter('mpc_dt', 0.06)
         self.declare_parameter('mpc_center_response', 1.05)
         self.declare_parameter('mpc_area_response', 0.24)
         self.declare_parameter('mpc_center_weight', 8.0)
@@ -420,8 +424,10 @@ class CompetitionPickPlace(Node):
             )
             return
 
-        found_deadline = time.monotonic() + float(self.get_parameter('search_timeout').value)
-        align_deadline = time.monotonic() + timeout
+        start = time.monotonic()
+        found_deadline = start + min(float(self.get_parameter('search_timeout').value), timeout)
+        align_deadline = start + timeout
+        period = self.visual_servo_period_seconds()
         stable = 0
         last_log = 0.0
         found_once = False
@@ -431,15 +437,17 @@ class CompetitionPickPlace(Node):
             now = time.monotonic()
             if det is None:
                 stable = 0
+                if now > align_deadline:
+                    if found_once:
+                        raise RuntimeError(f'{label} alignment timeout after temporary target loss')
+                    raise RuntimeError(f'{label} not found before alignment timeout')
                 if not found_once and now > found_deadline:
                     raise RuntimeError(f'{label} not found before search timeout')
-                if found_once and now > align_deadline:
-                    raise RuntimeError(f'{label} alignment timeout after temporary target loss')
                 self.publish_search_twist()
                 if now - last_log > 1.5:
                     self.get_logger().info(f'searching {label}; detections={self.visible_classes()}')
                     last_log = now
-                time.sleep(0.08)
+                time.sleep(period)
                 continue
 
             found_once = True
@@ -461,7 +469,7 @@ class CompetitionPickPlace(Node):
                         f'desired_cx={desired_center:.3f}, target_area={target_area:.3f}'
                     )
                     return
-                time.sleep(0.08)
+                time.sleep(period)
                 continue
 
             stable = 0
@@ -475,7 +483,7 @@ class CompetitionPickPlace(Node):
                     f'cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})'
                 )
                 last_log = now
-            time.sleep(0.08)
+            time.sleep(period)
 
         raise RuntimeError('stop requested during alignment')
 
@@ -632,16 +640,22 @@ class CompetitionPickPlace(Node):
             self.run_action_group_steps(pick_action, pregrasp_steps, f'{label} pregrasp')
 
         if bool(self.get_parameter('pick_preclose_required').value):
-            self.visual_servo_to_classes(
-                names=target_names,
-                timeout=float(self.get_parameter('pick_visual_servo_timeout').value),
-                target_area=preclose_area,
-                label=f'{label} pre-close',
-                desired_center=preclose_center,
-                center_tolerance=preclose_center_tol,
-                area_tolerance=preclose_area_tol,
-                stable_frames=int(self.get_parameter('pick_preclose_stable_frames').value),
-            )
+            try:
+                self.visual_servo_to_classes(
+                    names=target_names,
+                    timeout=float(self.get_parameter('pick_visual_servo_timeout').value),
+                    target_area=preclose_area,
+                    label=f'{label} pre-close',
+                    desired_center=preclose_center,
+                    center_tolerance=preclose_center_tol,
+                    area_tolerance=preclose_area_tol,
+                    stable_frames=int(self.get_parameter('pick_preclose_stable_frames').value),
+                )
+            except RuntimeError as exc:
+                self.stop_robot()
+                if bool(self.get_parameter('pick_preclose_fail_on_timeout').value):
+                    raise
+                self.get_logger().warn(f'best-effort {label} pre-close skipped: {exc}')
         self.run_action_group_steps(pick_action, close_steps, f'{label} close')
         self.run_action_group_steps(pick_action, lift_steps, f'{label} lift')
 
@@ -718,12 +732,15 @@ class CompetitionPickPlace(Node):
         names = set(target_names)
         self.get_logger().info(
             f'run visual-servo action steps {action_name} {list(step_indices)} for {label}: '
-            f'desired_cx={desired_center:.3f}, target_area={target_area:.3f}'
+            f'desired_cx={desired_center:.3f}, target_area={target_area:.3f}, '
+            f'period={self.visual_servo_period_seconds():.3f}s, '
+            f'time_scale={float(self.get_parameter("pick_pregrasp_time_scale").value):.2f}, '
+            f'min_step={float(self.get_parameter("pick_pregrasp_min_step_seconds").value):.2f}s'
         )
         for row in selected:
             if self.shutdown_requested:
                 raise RuntimeError('stop requested during visual-servo action steps')
-            duration = max(0.05, float(row[1]) / 1000.0)
+            duration = self.pregrasp_tracking_duration(row)
             self.publish_servo_row(row, wait=False)
             self.track_target_for_duration(
                 names=names,
@@ -735,6 +752,12 @@ class CompetitionPickPlace(Node):
             )
         self.stop_robot()
 
+    def pregrasp_tracking_duration(self, row: Sequence[int]) -> float:
+        base_duration = max(0.05, float(row[1]) / 1000.0)
+        time_scale = max(0.1, float(self.get_parameter('pick_pregrasp_time_scale').value))
+        min_duration = max(0.0, float(self.get_parameter('pick_pregrasp_min_step_seconds').value))
+        return max(base_duration * time_scale, min_duration)
+
     def track_target_for_duration(
         self,
         names: Iterable[str],
@@ -745,6 +768,7 @@ class CompetitionPickPlace(Node):
         label: str,
     ) -> None:
         deadline = time.monotonic() + duration
+        period = self.visual_servo_period_seconds()
         last_log = 0.0
         while rclpy.ok() and not self.shutdown_requested and time.monotonic() < deadline:
             det = self.best_detection(names)
@@ -754,7 +778,7 @@ class CompetitionPickPlace(Node):
                 if now - last_log > 0.5:
                     self.get_logger().info(f'visual-servo {label}: target temporarily hidden')
                     last_log = now
-                time.sleep(0.06)
+                time.sleep(period)
                 continue
 
             center_error = det.cx_ratio - desired_center
@@ -770,7 +794,7 @@ class CompetitionPickPlace(Node):
                     f'cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})'
                 )
                 last_log = now
-            time.sleep(0.06)
+            time.sleep(period)
 
     def load_action_group_rows(self, action_name: str) -> List[Tuple[int, int, int, int, int, int, int, int]]:
         path = os.path.join(str(self.get_parameter('action_group_path').value), action_name + '.d6a')
@@ -851,6 +875,9 @@ class CompetitionPickPlace(Node):
     @staticmethod
     def clamp(value: float, low: float, high: float) -> float:
         return max(low, min(high, value))
+
+    def visual_servo_period_seconds(self) -> float:
+        return self.clamp(float(self.get_parameter('visual_servo_period').value), 0.02, 0.20)
 
 
 def main(args=None) -> None:

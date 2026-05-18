@@ -52,8 +52,12 @@ def launch_setup(context):
     control_mode = LaunchConfiguration('control_mode')
     closed_loop_pick = LaunchConfiguration('closed_loop_pick')
     pick_visual_servo_timeout = LaunchConfiguration('pick_visual_servo_timeout')
+    visual_servo_period = LaunchConfiguration('visual_servo_period')
     pick_pregrasp_visual_servo = LaunchConfiguration('pick_pregrasp_visual_servo')
+    pick_pregrasp_time_scale = LaunchConfiguration('pick_pregrasp_time_scale')
+    pick_pregrasp_min_step_seconds = LaunchConfiguration('pick_pregrasp_min_step_seconds')
     pick_preclose_required = LaunchConfiguration('pick_preclose_required')
+    pick_preclose_fail_on_timeout = LaunchConfiguration('pick_preclose_fail_on_timeout')
     pick_preclose_center_x_ratio = LaunchConfiguration('pick_preclose_center_x_ratio')
     pick_preclose_target_area_ratio = LaunchConfiguration('pick_preclose_target_area_ratio')
     pick_preclose_center_tolerance_ratio = LaunchConfiguration('pick_preclose_center_tolerance_ratio')
@@ -136,8 +140,12 @@ def launch_setup(context):
                 'control_mode': control_mode,
                 'closed_loop_pick': ParameterValue(closed_loop_pick, value_type=bool),
                 'pick_visual_servo_timeout': ParameterValue(pick_visual_servo_timeout, value_type=float),
+                'visual_servo_period': ParameterValue(visual_servo_period, value_type=float),
                 'pick_pregrasp_visual_servo': ParameterValue(pick_pregrasp_visual_servo, value_type=bool),
+                'pick_pregrasp_time_scale': ParameterValue(pick_pregrasp_time_scale, value_type=float),
+                'pick_pregrasp_min_step_seconds': ParameterValue(pick_pregrasp_min_step_seconds, value_type=float),
                 'pick_preclose_required': ParameterValue(pick_preclose_required, value_type=bool),
+                'pick_preclose_fail_on_timeout': ParameterValue(pick_preclose_fail_on_timeout, value_type=bool),
                 'pick_preclose_center_x_ratio': ParameterValue(pick_preclose_center_x_ratio, value_type=float),
                 'pick_preclose_target_area_ratio': ParameterValue(pick_preclose_target_area_ratio, value_type=float),
                 'pick_preclose_center_tolerance_ratio': ParameterValue(pick_preclose_center_tolerance_ratio, value_type=float),
@@ -210,8 +218,12 @@ def generate_launch_description():
         DeclareLaunchArgument('control_mode', default_value='p'),
         DeclareLaunchArgument('closed_loop_pick', default_value='false'),
         DeclareLaunchArgument('pick_visual_servo_timeout', default_value='10.0'),
+        DeclareLaunchArgument('visual_servo_period', default_value='0.06'),
         DeclareLaunchArgument('pick_pregrasp_visual_servo', default_value='true'),
+        DeclareLaunchArgument('pick_pregrasp_time_scale', default_value='1.0'),
+        DeclareLaunchArgument('pick_pregrasp_min_step_seconds', default_value='0.0'),
         DeclareLaunchArgument('pick_preclose_required', default_value='true'),
+        DeclareLaunchArgument('pick_preclose_fail_on_timeout', default_value='true'),
         DeclareLaunchArgument('pick_preclose_center_x_ratio', default_value='0.50'),
         DeclareLaunchArgument('pick_preclose_target_area_ratio', default_value='-1.0'),
         DeclareLaunchArgument('pick_preclose_center_tolerance_ratio', default_value='-1.0'),
@@ -224,8 +236,8 @@ def generate_launch_description():
         DeclareLaunchArgument('max_linear_speed', default_value='0.10'),
         DeclareLaunchArgument('max_angular_speed', default_value='0.45'),
         DeclareLaunchArgument('search_angular_speed', default_value='0.22'),
-        DeclareLaunchArgument('mpc_horizon', default_value='6'),
-        DeclareLaunchArgument('mpc_dt', default_value='0.12'),
+        DeclareLaunchArgument('mpc_horizon', default_value='10'),
+        DeclareLaunchArgument('mpc_dt', default_value='0.06'),
         DeclareLaunchArgument('mpc_center_response', default_value='1.05'),
         DeclareLaunchArgument('mpc_area_response', default_value='0.24'),
         DeclareLaunchArgument('mpc_center_weight', default_value='8.0'),
