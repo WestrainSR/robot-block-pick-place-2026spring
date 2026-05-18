@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 import math
 import os
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import rclpy
 import yaml
@@ -110,6 +111,19 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('place_target_area_ratio', 0.080)
         self.declare_parameter('area_tolerance_ratio', 0.018)
         self.declare_parameter('stable_frames', 5)
+        self.declare_parameter('control_mode', 'p')
+        self.declare_parameter('closed_loop_pick', False)
+        self.declare_parameter('pick_visual_servo_timeout', 10.0)
+        self.declare_parameter('pick_pregrasp_visual_servo', True)
+        self.declare_parameter('pick_preclose_required', True)
+        self.declare_parameter('pick_preclose_center_x_ratio', 0.50)
+        self.declare_parameter('pick_preclose_target_area_ratio', -1.0)
+        self.declare_parameter('pick_preclose_center_tolerance_ratio', -1.0)
+        self.declare_parameter('pick_preclose_area_tolerance_ratio', -1.0)
+        self.declare_parameter('pick_preclose_stable_frames', 2)
+        self.declare_parameter('pick_pregrasp_steps', '1,2')
+        self.declare_parameter('pick_close_steps', '3,4')
+        self.declare_parameter('pick_lift_steps', '5,6')
         self.declare_parameter('linear_k', 0.42)
         self.declare_parameter('angular_k', 1.35)
         self.declare_parameter('max_linear_speed', 0.10)
@@ -117,6 +131,16 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('search_angular_speed', 0.22)
         self.declare_parameter('angular_sign', -1.0)
         self.declare_parameter('linear_sign', 1.0)
+        self.declare_parameter('mpc_horizon', 6)
+        self.declare_parameter('mpc_dt', 0.12)
+        self.declare_parameter('mpc_center_response', 1.05)
+        self.declare_parameter('mpc_area_response', 0.24)
+        self.declare_parameter('mpc_center_weight', 8.0)
+        self.declare_parameter('mpc_area_weight', 26.0)
+        self.declare_parameter('mpc_velocity_weight', 0.08)
+        self.declare_parameter('mpc_delta_weight', 0.16)
+        self.declare_parameter('mpc_terminal_weight', 2.2)
+        self.declare_parameter('mpc_center_gate_ratio', 0.12)
         self.declare_parameter('pick_action', 'navigation_pick')
         self.declare_parameter('place_action', 'navigation_place')
         self.declare_parameter('init_action', 'navigation_pick_init')
@@ -136,8 +160,11 @@ class CompetitionPickPlace(Node):
         self.min_score = float(self.get_parameter('min_score').value)
         self.stale_seconds = float(self.get_parameter('detection_stale_seconds').value)
         self.stable_frames = int(self.get_parameter('stable_frames').value)
+        self.control_mode = str(self.get_parameter('control_mode').value).strip().lower()
+        self.closed_loop_pick = bool(self.get_parameter('closed_loop_pick').value)
         self.waypoints = self.load_waypoints(str(self.get_parameter('waypoints_yaml').value))
         self.target_aliases = set(self.parse_aliases(self.get_parameter('target_aliases').value))
+        self.last_twist = Twist()
 
         self.cmd_pub = self.create_publisher(Twist, str(self.get_parameter('cmd_vel_topic').value), 1)
         self.create_subscription(
@@ -252,15 +279,15 @@ class CompetitionPickPlace(Node):
                 self.navigate_to('material_standoff_pose')
 
                 self.set_phase(Phase.SEARCH_TARGET, f'{prefix}: searching {sorted(target_names)}')
-                self.align_to_classes(
+                self.visual_servo_to_classes(
                     names=target_names,
                     timeout=float(self.get_parameter('align_timeout').value),
                     target_area=float(self.get_parameter('pick_target_area_ratio').value),
                     label=f'{target} pick target',
                 )
 
-                self.set_phase(Phase.PICK, f'{prefix}: running pick action group')
-                self.run_action_group(str(self.get_parameter('pick_action').value), f'{target} pick')
+                self.set_phase(Phase.PICK, f'{prefix}: running pick controller')
+                self.run_pick_controller(target_names, f'{target} pick')
                 if self.stop_after_pick:
                     self.stop_robot()
                     self.set_phase(Phase.DONE, f'{prefix}: stop_after_pick=true')
@@ -272,7 +299,7 @@ class CompetitionPickPlace(Node):
 
                 if self.place_class:
                     self.set_phase(Phase.ALIGN_PLACE, f'{prefix}: aligning place marker {self.place_class}')
-                    self.align_to_classes(
+                    self.visual_servo_to_classes(
                         names={self.place_class},
                         timeout=float(self.get_parameter('place_align_timeout').value),
                         target_area=float(self.get_parameter('place_target_area_ratio').value),
@@ -358,10 +385,39 @@ class CompetitionPickPlace(Node):
         pose.pose.orientation.w = math.cos(yaw * 0.5)
         return pose
 
-    def align_to_classes(self, names: Iterable[str], timeout: float, target_area: float, label: str) -> None:
+    def visual_servo_to_classes(
+        self,
+        names: Iterable[str],
+        timeout: float,
+        target_area: float,
+        label: str,
+        desired_center: Optional[float] = None,
+        center_tolerance: Optional[float] = None,
+        area_tolerance: Optional[float] = None,
+        stable_frames: Optional[int] = None,
+    ) -> None:
         names = set(names)
+        desired_center = (
+            float(self.get_parameter('desired_center_x_ratio').value)
+            if desired_center is None
+            else float(desired_center)
+        )
+        center_tolerance = (
+            float(self.get_parameter('center_tolerance_ratio').value)
+            if center_tolerance is None
+            else float(center_tolerance)
+        )
+        area_tolerance = (
+            float(self.get_parameter('area_tolerance_ratio').value)
+            if area_tolerance is None
+            else float(area_tolerance)
+        )
+        stable_required = self.stable_frames if stable_frames is None else max(1, int(stable_frames))
         if self.dry_run:
-            self.get_logger().info(f'dry-run align {label}: names={sorted(names)}, target_area={target_area}')
+            self.get_logger().info(
+                f'dry-run visual servo {label}: names={sorted(names)}, target_area={target_area}, '
+                f'desired_center={desired_center}, control_mode={self.control_mode}'
+            )
             return
 
         found_deadline = time.monotonic() + float(self.get_parameter('search_timeout').value)
@@ -390,46 +446,31 @@ class CompetitionPickPlace(Node):
             if now > align_deadline:
                 raise RuntimeError(f'{label} alignment timeout')
 
-            center_error = det.cx_ratio - float(self.get_parameter('desired_center_x_ratio').value)
+            center_error = det.cx_ratio - desired_center
             area_error = target_area - det.area_ratio
-            center_tol = float(self.get_parameter('center_tolerance_ratio').value)
-            area_tol = float(self.get_parameter('area_tolerance_ratio').value)
+            center_tol = center_tolerance
+            area_tol = area_tolerance
 
             if abs(center_error) <= center_tol and abs(area_error) <= area_tol:
                 stable += 1
                 self.stop_robot()
-                if stable >= self.stable_frames:
+                if stable >= stable_required:
                     self.get_logger().info(
                         f'{label} aligned: class={det.class_name}, score={det.score:.2f}, '
-                        f'cx={det.cx_ratio:.3f}, area={det.area_ratio:.3f}'
+                        f'cx={det.cx_ratio:.3f}, area={det.area_ratio:.3f}, '
+                        f'desired_cx={desired_center:.3f}, target_area={target_area:.3f}'
                     )
                     return
                 time.sleep(0.08)
                 continue
 
             stable = 0
-            twist = Twist()
-            angular = (
-                float(self.get_parameter('angular_sign').value)
-                * float(self.get_parameter('angular_k').value)
-                * center_error
-            )
-            max_angular = float(self.get_parameter('max_angular_speed').value)
-            twist.angular.z = self.clamp(angular, -max_angular, max_angular)
-
-            if abs(center_error) < center_tol * 2.5:
-                linear = (
-                    float(self.get_parameter('linear_sign').value)
-                    * float(self.get_parameter('linear_k').value)
-                    * area_error
-                )
-                max_linear = float(self.get_parameter('max_linear_speed').value)
-                twist.linear.x = self.clamp(linear, -max_linear * 0.45, max_linear)
-
+            twist = self.compute_visual_servo_twist(center_error, area_error, center_tol)
             self.cmd_pub.publish(twist)
+            self.last_twist = twist
             if now - last_log > 0.8:
                 self.get_logger().info(
-                    f'align {label}: class={det.class_name} score={det.score:.2f} '
+                    f'visual servo {label}: mode={self.control_mode} class={det.class_name} score={det.score:.2f} '
                     f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f} '
                     f'cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})'
                 )
@@ -437,6 +478,92 @@ class CompetitionPickPlace(Node):
             time.sleep(0.08)
 
         raise RuntimeError('stop requested during alignment')
+
+    def compute_visual_servo_twist(self, center_error: float, area_error: float, center_tol: float) -> Twist:
+        if self.control_mode == 'mpc':
+            return self.compute_mpc_twist(center_error, area_error, center_tol)
+        return self.compute_p_twist(center_error, area_error, center_tol)
+
+    def compute_p_twist(self, center_error: float, area_error: float, center_tol: float) -> Twist:
+        twist = Twist()
+        angular = (
+            float(self.get_parameter('angular_sign').value)
+            * float(self.get_parameter('angular_k').value)
+            * center_error
+        )
+        max_angular = float(self.get_parameter('max_angular_speed').value)
+        twist.angular.z = self.clamp(angular, -max_angular, max_angular)
+
+        if abs(center_error) < center_tol * 2.5:
+            linear = (
+                float(self.get_parameter('linear_sign').value)
+                * float(self.get_parameter('linear_k').value)
+                * area_error
+            )
+            max_linear = float(self.get_parameter('max_linear_speed').value)
+            twist.linear.x = self.clamp(linear, -max_linear * 0.45, max_linear)
+        return twist
+
+    def compute_mpc_twist(self, center_error: float, area_error: float, center_tol: float) -> Twist:
+        max_linear = float(self.get_parameter('max_linear_speed').value)
+        max_angular = float(self.get_parameter('max_angular_speed').value)
+        center_gate = max(center_tol * 2.8, float(self.get_parameter('mpc_center_gate_ratio').value))
+        linear_candidates = self.mpc_candidates(max_linear)
+        angular_candidates = self.mpc_candidates(max_angular)
+
+        best_cost = float('inf')
+        best_linear = 0.0
+        best_angular = 0.0
+        for linear in linear_candidates:
+            if abs(center_error) > center_gate and linear > 1e-6:
+                continue
+            for angular in angular_candidates:
+                cost = self.predict_mpc_cost(center_error, area_error, linear, angular)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_linear = linear
+                    best_angular = angular
+
+        twist = Twist()
+        twist.linear.x = best_linear
+        twist.angular.z = best_angular
+        return twist
+
+    def mpc_candidates(self, max_abs: float) -> List[float]:
+        if max_abs <= 1e-6:
+            return [0.0]
+        return [-max_abs, -0.5 * max_abs, 0.0, 0.5 * max_abs, max_abs]
+
+    def predict_mpc_cost(self, center_error: float, area_error: float, linear: float, angular: float) -> float:
+        horizon = max(1, int(self.get_parameter('mpc_horizon').value))
+        dt = max(0.02, float(self.get_parameter('mpc_dt').value))
+        center_response = float(self.get_parameter('mpc_center_response').value)
+        area_response = float(self.get_parameter('mpc_area_response').value)
+        center_weight = float(self.get_parameter('mpc_center_weight').value)
+        area_weight = float(self.get_parameter('mpc_area_weight').value)
+        velocity_weight = float(self.get_parameter('mpc_velocity_weight').value)
+        delta_weight = float(self.get_parameter('mpc_delta_weight').value)
+        terminal_weight = float(self.get_parameter('mpc_terminal_weight').value)
+        angular_sign = float(self.get_parameter('angular_sign').value)
+        linear_sign = float(self.get_parameter('linear_sign').value)
+
+        predicted_center = center_error
+        predicted_area = area_error
+        cost = 0.0
+        last_linear = float(getattr(self.last_twist, 'linear', Twist().linear).x)
+        last_angular = float(getattr(self.last_twist, 'angular', Twist().angular).z)
+        for _ in range(horizon):
+            predicted_center -= center_response * angular_sign * angular * dt
+            predicted_area -= area_response * linear_sign * linear * dt
+            cost += center_weight * predicted_center * predicted_center
+            cost += area_weight * predicted_area * predicted_area
+            cost += velocity_weight * (linear * linear + 0.35 * angular * angular)
+        cost += delta_weight * ((linear - last_linear) ** 2 + 0.4 * (angular - last_angular) ** 2)
+        cost += terminal_weight * (
+            center_weight * predicted_center * predicted_center
+            + area_weight * predicted_area * predicted_area
+        )
+        return cost
 
     def best_detection(self, names: Iterable[str]) -> Optional[Detection]:
         now = time.monotonic()
@@ -461,6 +588,229 @@ class CompetitionPickPlace(Node):
         twist = Twist()
         twist.angular.z = float(self.get_parameter('search_angular_speed').value)
         self.cmd_pub.publish(twist)
+        self.last_twist = twist
+
+    def run_pick_controller(self, target_names: Iterable[str], label: str) -> None:
+        if not self.closed_loop_pick:
+            self.run_action_group(str(self.get_parameter('pick_action').value), label)
+            return
+        if self.dry_run:
+            self.get_logger().info(f'dry-run closed-loop pick {label}')
+            return
+
+        pick_action = str(self.get_parameter('pick_action').value)
+        pregrasp_steps = self.parse_step_indices(self.get_parameter('pick_pregrasp_steps').value)
+        close_steps = self.parse_step_indices(self.get_parameter('pick_close_steps').value)
+        lift_steps = self.parse_step_indices(self.get_parameter('pick_lift_steps').value)
+
+        self.get_logger().info(
+            f'closed-loop pick {label}: pregrasp={pregrasp_steps}, close={close_steps}, '
+            f'lift={lift_steps}, mode={self.control_mode}'
+        )
+        preclose_area = float(self.get_parameter('pick_preclose_target_area_ratio').value)
+        if preclose_area <= 0.0:
+            preclose_area = float(self.get_parameter('pick_target_area_ratio').value)
+        preclose_center_tol = float(self.get_parameter('pick_preclose_center_tolerance_ratio').value)
+        if preclose_center_tol <= 0.0:
+            preclose_center_tol = float(self.get_parameter('center_tolerance_ratio').value)
+        preclose_area_tol = float(self.get_parameter('pick_preclose_area_tolerance_ratio').value)
+        if preclose_area_tol <= 0.0:
+            preclose_area_tol = float(self.get_parameter('area_tolerance_ratio').value)
+
+        preclose_center = float(self.get_parameter('pick_preclose_center_x_ratio').value)
+        if bool(self.get_parameter('pick_pregrasp_visual_servo').value):
+            self.run_action_group_steps_with_visual_servo(
+                pick_action,
+                pregrasp_steps,
+                target_names,
+                f'{label} pregrasp',
+                desired_center=preclose_center,
+                target_area=preclose_area,
+                center_tolerance=preclose_center_tol,
+            )
+        else:
+            self.run_action_group_steps(pick_action, pregrasp_steps, f'{label} pregrasp')
+
+        if bool(self.get_parameter('pick_preclose_required').value):
+            self.visual_servo_to_classes(
+                names=target_names,
+                timeout=float(self.get_parameter('pick_visual_servo_timeout').value),
+                target_area=preclose_area,
+                label=f'{label} pre-close',
+                desired_center=preclose_center,
+                center_tolerance=preclose_center_tol,
+                area_tolerance=preclose_area_tol,
+                stable_frames=int(self.get_parameter('pick_preclose_stable_frames').value),
+            )
+        self.run_action_group_steps(pick_action, close_steps, f'{label} close')
+        self.run_action_group_steps(pick_action, lift_steps, f'{label} lift')
+
+    def parse_step_indices(self, value) -> List[int]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(',') if part.strip()]
+        else:
+            parts = [str(part).strip() for part in value if str(part).strip()]
+        result: List[int] = []
+        for part in parts:
+            try:
+                index = int(part)
+            except ValueError as exc:
+                raise RuntimeError(f'invalid action step index {part!r}') from exc
+            if index <= 0:
+                raise RuntimeError(f'action step index must be positive, got {index}')
+            result.append(index)
+        return result
+
+    def run_action_group_steps(self, action_name: str, step_indices: Sequence[int], label: str) -> None:
+        if not step_indices:
+            self.get_logger().warn(f'no action steps configured for {label}')
+            return
+        if not self.use_arm:
+            self.get_logger().warn(f'use_arm=false: skip {label} action steps {list(step_indices)}')
+            return
+        if self.dry_run:
+            self.get_logger().info(f'dry-run action steps {label}: {action_name} {list(step_indices)}')
+            return
+        if ServosPosition is None:
+            raise RuntimeError('servo_controller_msgs is not available')
+
+        self.stop_robot()
+        rows = self.load_action_group_rows(action_name)
+        selected = [row for row in rows if int(row[0]) in set(step_indices)]
+        if len(selected) != len(set(step_indices)):
+            available = [int(row[0]) for row in rows]
+            raise RuntimeError(f'{label}: requested steps {list(step_indices)} not in action group {available}')
+        self.get_logger().info(f'run action group steps {action_name} {list(step_indices)} for {label}')
+        for row in selected:
+            if self.shutdown_requested:
+                raise RuntimeError('stop requested during action steps')
+            self.publish_servo_row(row)
+
+    def run_action_group_steps_with_visual_servo(
+        self,
+        action_name: str,
+        step_indices: Sequence[int],
+        target_names: Iterable[str],
+        label: str,
+        desired_center: float,
+        target_area: float,
+        center_tolerance: float,
+    ) -> None:
+        if not step_indices:
+            self.get_logger().warn(f'no action steps configured for {label}')
+            return
+        if not self.use_arm:
+            self.get_logger().warn(f'use_arm=false: skip {label} visual-servo action steps {list(step_indices)}')
+            return
+        if self.dry_run:
+            self.get_logger().info(f'dry-run visual-servo action steps {label}: {action_name} {list(step_indices)}')
+            return
+
+        self.stop_robot()
+        rows = self.load_action_group_rows(action_name)
+        selected = [row for row in rows if int(row[0]) in set(step_indices)]
+        if len(selected) != len(set(step_indices)):
+            available = [int(row[0]) for row in rows]
+            raise RuntimeError(f'{label}: requested steps {list(step_indices)} not in action group {available}')
+
+        names = set(target_names)
+        self.get_logger().info(
+            f'run visual-servo action steps {action_name} {list(step_indices)} for {label}: '
+            f'desired_cx={desired_center:.3f}, target_area={target_area:.3f}'
+        )
+        for row in selected:
+            if self.shutdown_requested:
+                raise RuntimeError('stop requested during visual-servo action steps')
+            duration = max(0.05, float(row[1]) / 1000.0)
+            self.publish_servo_row(row, wait=False)
+            self.track_target_for_duration(
+                names=names,
+                duration=duration,
+                desired_center=desired_center,
+                target_area=target_area,
+                center_tolerance=center_tolerance,
+                label=label,
+            )
+        self.stop_robot()
+
+    def track_target_for_duration(
+        self,
+        names: Iterable[str],
+        duration: float,
+        desired_center: float,
+        target_area: float,
+        center_tolerance: float,
+        label: str,
+    ) -> None:
+        deadline = time.monotonic() + duration
+        last_log = 0.0
+        while rclpy.ok() and not self.shutdown_requested and time.monotonic() < deadline:
+            det = self.best_detection(names)
+            now = time.monotonic()
+            if det is None:
+                self.stop_robot()
+                if now - last_log > 0.5:
+                    self.get_logger().info(f'visual-servo {label}: target temporarily hidden')
+                    last_log = now
+                time.sleep(0.06)
+                continue
+
+            center_error = det.cx_ratio - desired_center
+            area_error = target_area - det.area_ratio
+            twist = self.compute_visual_servo_twist(center_error, area_error, center_tolerance)
+            self.cmd_pub.publish(twist)
+            self.last_twist = twist
+            if now - last_log > 0.45:
+                self.get_logger().info(
+                    f'visual-servo {label}: class={det.class_name} score={det.score:.2f} '
+                    f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f} '
+                    f'desired_cx={desired_center:.3f} target_area={target_area:.3f} '
+                    f'cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})'
+                )
+                last_log = now
+            time.sleep(0.06)
+
+    def load_action_group_rows(self, action_name: str) -> List[Tuple[int, int, int, int, int, int, int, int]]:
+        path = os.path.join(str(self.get_parameter('action_group_path').value), action_name + '.d6a')
+        if not os.path.exists(path):
+            raise RuntimeError(f'action group file not found: {path}')
+        con = sqlite3.connect(path)
+        try:
+            rows = con.execute('select * from ActionGroup order by [Index]').fetchall()
+        finally:
+            con.close()
+        if not rows:
+            raise RuntimeError(f'action group has no steps: {path}')
+        return rows
+
+    def publish_servo_row(self, row: Sequence[int], wait: bool = True) -> None:
+        if len(row) < 8:
+            raise RuntimeError(f'invalid action row: {row!r}')
+        msg = ServosPosition()
+        msg.position_unit = 'pulse'
+        msg.duration = float(row[1]) / 1000.0
+        positions = []
+        for offset, value in enumerate(row[2:8], start=1):
+            servo = self.make_servo_position(10 if offset == 6 else offset, float(value))
+            positions.append(servo)
+        msg.position = positions
+        if self.arm_controller is None:
+            raise RuntimeError('arm controller is not initialized')
+        self.arm_controller.servo_controller_pub.publish(msg)
+        if wait:
+            time.sleep(msg.duration)
+
+    def make_servo_position(self, servo_id: int, position: float):
+        try:
+            from servo_controller_msgs.msg import ServoPosition
+        except Exception as exc:
+            raise RuntimeError('ServoPosition message is not available') from exc
+        servo = ServoPosition()
+        servo.id = int(servo_id)
+        servo.position = float(position)
+        return servo
 
     def run_action_group(self, action_name: str, label: str) -> None:
         if not self.use_arm:
@@ -484,6 +834,7 @@ class CompetitionPickPlace(Node):
             for _ in range(3):
                 self.cmd_pub.publish(zero)
                 time.sleep(0.02)
+            self.last_twist = zero
         except Exception as exc:
             self.get_logger().debug(f'ignored stop publish after shutdown: {exc}')
 

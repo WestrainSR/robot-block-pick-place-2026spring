@@ -39,6 +39,9 @@ def launch_setup(context):
     yolo_model = LaunchConfiguration('yolo_model')
     yolo_conf = LaunchConfiguration('yolo_conf')
     waypoints_yaml = LaunchConfiguration('waypoints_yaml')
+    init_action = LaunchConfiguration('init_action')
+    pick_action = LaunchConfiguration('pick_action')
+    place_action = LaunchConfiguration('place_action')
     search_timeout = LaunchConfiguration('search_timeout')
     align_timeout = LaunchConfiguration('align_timeout')
     desired_center_x_ratio = LaunchConfiguration('desired_center_x_ratio')
@@ -46,10 +49,33 @@ def launch_setup(context):
     pick_target_area_ratio = LaunchConfiguration('pick_target_area_ratio')
     area_tolerance_ratio = LaunchConfiguration('area_tolerance_ratio')
     stable_frames = LaunchConfiguration('stable_frames')
+    control_mode = LaunchConfiguration('control_mode')
+    closed_loop_pick = LaunchConfiguration('closed_loop_pick')
+    pick_visual_servo_timeout = LaunchConfiguration('pick_visual_servo_timeout')
+    pick_pregrasp_visual_servo = LaunchConfiguration('pick_pregrasp_visual_servo')
+    pick_preclose_required = LaunchConfiguration('pick_preclose_required')
+    pick_preclose_center_x_ratio = LaunchConfiguration('pick_preclose_center_x_ratio')
+    pick_preclose_target_area_ratio = LaunchConfiguration('pick_preclose_target_area_ratio')
+    pick_preclose_center_tolerance_ratio = LaunchConfiguration('pick_preclose_center_tolerance_ratio')
+    pick_preclose_area_tolerance_ratio = LaunchConfiguration('pick_preclose_area_tolerance_ratio')
+    pick_preclose_stable_frames = LaunchConfiguration('pick_preclose_stable_frames')
+    pick_pregrasp_steps = LaunchConfiguration('pick_pregrasp_steps')
+    pick_close_steps = LaunchConfiguration('pick_close_steps')
+    pick_lift_steps = LaunchConfiguration('pick_lift_steps')
     angular_k = LaunchConfiguration('angular_k')
     max_linear_speed = LaunchConfiguration('max_linear_speed')
     max_angular_speed = LaunchConfiguration('max_angular_speed')
     search_angular_speed = LaunchConfiguration('search_angular_speed')
+    mpc_horizon = LaunchConfiguration('mpc_horizon')
+    mpc_dt = LaunchConfiguration('mpc_dt')
+    mpc_center_response = LaunchConfiguration('mpc_center_response')
+    mpc_area_response = LaunchConfiguration('mpc_area_response')
+    mpc_center_weight = LaunchConfiguration('mpc_center_weight')
+    mpc_area_weight = LaunchConfiguration('mpc_area_weight')
+    mpc_velocity_weight = LaunchConfiguration('mpc_velocity_weight')
+    mpc_delta_weight = LaunchConfiguration('mpc_delta_weight')
+    mpc_terminal_weight = LaunchConfiguration('mpc_terminal_weight')
+    mpc_center_gate_ratio = LaunchConfiguration('mpc_center_gate_ratio')
 
     navigation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(navigation_path, 'launch/navigation.launch.py')),
@@ -97,6 +123,9 @@ def launch_setup(context):
                 'use_nav': ParameterValue(use_nav, value_type=bool),
                 'use_arm': ParameterValue(use_arm, value_type=bool),
                 'waypoints_yaml': waypoints_yaml,
+                'init_action': init_action,
+                'pick_action': pick_action,
+                'place_action': place_action,
                 'search_timeout': ParameterValue(search_timeout, value_type=float),
                 'align_timeout': ParameterValue(align_timeout, value_type=float),
                 'desired_center_x_ratio': ParameterValue(desired_center_x_ratio, value_type=float),
@@ -104,10 +133,33 @@ def launch_setup(context):
                 'pick_target_area_ratio': ParameterValue(pick_target_area_ratio, value_type=float),
                 'area_tolerance_ratio': ParameterValue(area_tolerance_ratio, value_type=float),
                 'stable_frames': ParameterValue(stable_frames, value_type=int),
+                'control_mode': control_mode,
+                'closed_loop_pick': ParameterValue(closed_loop_pick, value_type=bool),
+                'pick_visual_servo_timeout': ParameterValue(pick_visual_servo_timeout, value_type=float),
+                'pick_pregrasp_visual_servo': ParameterValue(pick_pregrasp_visual_servo, value_type=bool),
+                'pick_preclose_required': ParameterValue(pick_preclose_required, value_type=bool),
+                'pick_preclose_center_x_ratio': ParameterValue(pick_preclose_center_x_ratio, value_type=float),
+                'pick_preclose_target_area_ratio': ParameterValue(pick_preclose_target_area_ratio, value_type=float),
+                'pick_preclose_center_tolerance_ratio': ParameterValue(pick_preclose_center_tolerance_ratio, value_type=float),
+                'pick_preclose_area_tolerance_ratio': ParameterValue(pick_preclose_area_tolerance_ratio, value_type=float),
+                'pick_preclose_stable_frames': ParameterValue(pick_preclose_stable_frames, value_type=int),
+                'pick_pregrasp_steps': pick_pregrasp_steps,
+                'pick_close_steps': pick_close_steps,
+                'pick_lift_steps': pick_lift_steps,
                 'angular_k': ParameterValue(angular_k, value_type=float),
                 'max_linear_speed': ParameterValue(max_linear_speed, value_type=float),
                 'max_angular_speed': ParameterValue(max_angular_speed, value_type=float),
                 'search_angular_speed': ParameterValue(search_angular_speed, value_type=float),
+                'mpc_horizon': ParameterValue(mpc_horizon, value_type=int),
+                'mpc_dt': ParameterValue(mpc_dt, value_type=float),
+                'mpc_center_response': ParameterValue(mpc_center_response, value_type=float),
+                'mpc_area_response': ParameterValue(mpc_area_response, value_type=float),
+                'mpc_center_weight': ParameterValue(mpc_center_weight, value_type=float),
+                'mpc_area_weight': ParameterValue(mpc_area_weight, value_type=float),
+                'mpc_velocity_weight': ParameterValue(mpc_velocity_weight, value_type=float),
+                'mpc_delta_weight': ParameterValue(mpc_delta_weight, value_type=float),
+                'mpc_terminal_weight': ParameterValue(mpc_terminal_weight, value_type=float),
+                'mpc_center_gate_ratio': ParameterValue(mpc_center_gate_ratio, value_type=float),
             },
         ],
     )
@@ -145,6 +197,9 @@ def generate_launch_description():
         DeclareLaunchArgument('yolo_model', default_value='competition_blocks'),
         DeclareLaunchArgument('yolo_conf', default_value='0.70'),
         DeclareLaunchArgument('waypoints_yaml', default_value=default_waypoints),
+        DeclareLaunchArgument('init_action', default_value='navigation_pick_init'),
+        DeclareLaunchArgument('pick_action', default_value='navigation_pick'),
+        DeclareLaunchArgument('place_action', default_value='navigation_place'),
         DeclareLaunchArgument('search_timeout', default_value='18.0'),
         DeclareLaunchArgument('align_timeout', default_value='24.0'),
         DeclareLaunchArgument('desired_center_x_ratio', default_value='0.50'),
@@ -152,9 +207,32 @@ def generate_launch_description():
         DeclareLaunchArgument('pick_target_area_ratio', default_value='0.095'),
         DeclareLaunchArgument('area_tolerance_ratio', default_value='0.018'),
         DeclareLaunchArgument('stable_frames', default_value='5'),
+        DeclareLaunchArgument('control_mode', default_value='p'),
+        DeclareLaunchArgument('closed_loop_pick', default_value='false'),
+        DeclareLaunchArgument('pick_visual_servo_timeout', default_value='10.0'),
+        DeclareLaunchArgument('pick_pregrasp_visual_servo', default_value='true'),
+        DeclareLaunchArgument('pick_preclose_required', default_value='true'),
+        DeclareLaunchArgument('pick_preclose_center_x_ratio', default_value='0.50'),
+        DeclareLaunchArgument('pick_preclose_target_area_ratio', default_value='-1.0'),
+        DeclareLaunchArgument('pick_preclose_center_tolerance_ratio', default_value='-1.0'),
+        DeclareLaunchArgument('pick_preclose_area_tolerance_ratio', default_value='-1.0'),
+        DeclareLaunchArgument('pick_preclose_stable_frames', default_value='2'),
+        DeclareLaunchArgument('pick_pregrasp_steps', default_value='1,2'),
+        DeclareLaunchArgument('pick_close_steps', default_value='3,4'),
+        DeclareLaunchArgument('pick_lift_steps', default_value='5,6'),
         DeclareLaunchArgument('angular_k', default_value='1.35'),
         DeclareLaunchArgument('max_linear_speed', default_value='0.10'),
         DeclareLaunchArgument('max_angular_speed', default_value='0.45'),
         DeclareLaunchArgument('search_angular_speed', default_value='0.22'),
+        DeclareLaunchArgument('mpc_horizon', default_value='6'),
+        DeclareLaunchArgument('mpc_dt', default_value='0.12'),
+        DeclareLaunchArgument('mpc_center_response', default_value='1.05'),
+        DeclareLaunchArgument('mpc_area_response', default_value='0.24'),
+        DeclareLaunchArgument('mpc_center_weight', default_value='8.0'),
+        DeclareLaunchArgument('mpc_area_weight', default_value='26.0'),
+        DeclareLaunchArgument('mpc_velocity_weight', default_value='0.08'),
+        DeclareLaunchArgument('mpc_delta_weight', default_value='0.16'),
+        DeclareLaunchArgument('mpc_terminal_weight', default_value='2.2'),
+        DeclareLaunchArgument('mpc_center_gate_ratio', default_value='0.12'),
         OpaqueFunction(function=launch_setup),
     ])

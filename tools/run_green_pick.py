@@ -18,6 +18,18 @@ def parse_args():
     parser.add_argument('--target-area', type=float, default=0.042)
     parser.add_argument('--area-tolerance', type=float, default=0.012)
     parser.add_argument('--stable-frames', type=int, default=4)
+    parser.add_argument('--control-mode', default='mpc', choices=['p', 'mpc'])
+    parser.add_argument('--closed-loop-pick', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--pick-visual-servo-timeout', type=float, default=12.0)
+    parser.add_argument('--init-action', default='navigation_pick_init_ai')
+    parser.add_argument('--pick-action', default='navigation_pick_ai')
+    parser.add_argument('--pregrasp-visual-servo', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--preclose-required', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--preclose-center', type=float, default=0.90)
+    parser.add_argument('--preclose-target-area', type=float, default=0.073)
+    parser.add_argument('--preclose-center-tolerance', type=float, default=0.065)
+    parser.add_argument('--preclose-area-tolerance', type=float, default=0.020)
+    parser.add_argument('--preclose-stable-frames', type=int, default=1)
     return parser.parse_args()
 
 
@@ -58,6 +70,8 @@ ros2 launch competition_pick_place "$LAUNCH_FILE" \\
   use_arm:=true \\
   yolo_model:=competition_blocks \\
   yolo_conf:=0.70 \\
+  init_action:={shlex.quote(args.init_action)} \\
+  pick_action:={shlex.quote(args.pick_action)} \\
   search_timeout:=12.0 \\
   align_timeout:=45.0 \\
   desired_center_x_ratio:={args.center:.4f} \\
@@ -65,10 +79,30 @@ ros2 launch competition_pick_place "$LAUNCH_FILE" \\
   pick_target_area_ratio:={args.target_area:.4f} \\
   area_tolerance_ratio:={args.area_tolerance:.4f} \\
   stable_frames:={int(args.stable_frames)} \\
+  control_mode:={shlex.quote(args.control_mode)} \\
+  closed_loop_pick:={str(bool(args.closed_loop_pick)).lower()} \\
+  pick_visual_servo_timeout:={args.pick_visual_servo_timeout:.1f} \\
+  pick_pregrasp_visual_servo:={str(bool(args.pregrasp_visual_servo)).lower()} \\
+  pick_preclose_required:={str(bool(args.preclose_required)).lower()} \\
+  pick_preclose_center_x_ratio:={args.preclose_center:.4f} \\
+  pick_preclose_target_area_ratio:={args.preclose_target_area:.4f} \\
+  pick_preclose_center_tolerance_ratio:={args.preclose_center_tolerance:.4f} \\
+  pick_preclose_area_tolerance_ratio:={args.preclose_area_tolerance:.4f} \\
+  pick_preclose_stable_frames:={int(args.preclose_stable_frames)} \\
   angular_k:=0.80 \\
   max_linear_speed:=0.06 \\
-  max_angular_speed:=0.25 \\
-  search_angular_speed:=0.12 > "$LOG" 2>&1 &
+  max_angular_speed:=0.20 \\
+  search_angular_speed:=0.12 \\
+  mpc_horizon:=6 \\
+  mpc_dt:=0.12 \\
+  mpc_center_response:=1.05 \\
+  mpc_area_response:=0.24 \\
+  mpc_center_weight:=8.0 \\
+  mpc_area_weight:=26.0 \\
+  mpc_velocity_weight:=0.08 \\
+  mpc_delta_weight:=0.16 \\
+  mpc_terminal_weight:=2.2 \\
+  mpc_center_gate_ratio:=0.10 > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 echo "launch_pid=$LAUNCH_PID"
 
