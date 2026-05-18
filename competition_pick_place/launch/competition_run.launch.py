@@ -41,9 +41,15 @@ def launch_setup(context):
     waypoints_yaml = LaunchConfiguration('waypoints_yaml')
     search_timeout = LaunchConfiguration('search_timeout')
     align_timeout = LaunchConfiguration('align_timeout')
+    desired_center_x_ratio = LaunchConfiguration('desired_center_x_ratio')
+    center_tolerance_ratio = LaunchConfiguration('center_tolerance_ratio')
     pick_target_area_ratio = LaunchConfiguration('pick_target_area_ratio')
     area_tolerance_ratio = LaunchConfiguration('area_tolerance_ratio')
+    stable_frames = LaunchConfiguration('stable_frames')
+    angular_k = LaunchConfiguration('angular_k')
     max_linear_speed = LaunchConfiguration('max_linear_speed')
+    max_angular_speed = LaunchConfiguration('max_angular_speed')
+    search_angular_speed = LaunchConfiguration('search_angular_speed')
 
     navigation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(navigation_path, 'launch/navigation.launch.py')),
@@ -93,9 +99,15 @@ def launch_setup(context):
                 'waypoints_yaml': waypoints_yaml,
                 'search_timeout': ParameterValue(search_timeout, value_type=float),
                 'align_timeout': ParameterValue(align_timeout, value_type=float),
+                'desired_center_x_ratio': ParameterValue(desired_center_x_ratio, value_type=float),
+                'center_tolerance_ratio': ParameterValue(center_tolerance_ratio, value_type=float),
                 'pick_target_area_ratio': ParameterValue(pick_target_area_ratio, value_type=float),
                 'area_tolerance_ratio': ParameterValue(area_tolerance_ratio, value_type=float),
+                'stable_frames': ParameterValue(stable_frames, value_type=int),
+                'angular_k': ParameterValue(angular_k, value_type=float),
                 'max_linear_speed': ParameterValue(max_linear_speed, value_type=float),
+                'max_angular_speed': ParameterValue(max_angular_speed, value_type=float),
+                'search_angular_speed': ParameterValue(search_angular_speed, value_type=float),
             },
         ],
     )
@@ -135,8 +147,14 @@ def generate_launch_description():
         DeclareLaunchArgument('waypoints_yaml', default_value=default_waypoints),
         DeclareLaunchArgument('search_timeout', default_value='18.0'),
         DeclareLaunchArgument('align_timeout', default_value='24.0'),
+        DeclareLaunchArgument('desired_center_x_ratio', default_value='0.50'),
+        DeclareLaunchArgument('center_tolerance_ratio', default_value='0.055'),
         DeclareLaunchArgument('pick_target_area_ratio', default_value='0.095'),
         DeclareLaunchArgument('area_tolerance_ratio', default_value='0.018'),
+        DeclareLaunchArgument('stable_frames', default_value='5'),
+        DeclareLaunchArgument('angular_k', default_value='1.35'),
         DeclareLaunchArgument('max_linear_speed', default_value='0.10'),
+        DeclareLaunchArgument('max_angular_speed', default_value='0.45'),
+        DeclareLaunchArgument('search_angular_speed', default_value='0.22'),
         OpaqueFunction(function=launch_setup),
     ])

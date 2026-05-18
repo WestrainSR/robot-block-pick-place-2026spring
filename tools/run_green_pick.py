@@ -13,6 +13,11 @@ def parse_args():
     parser.add_argument('--container', default='MentorPi')
     parser.add_argument('--target-class', default='green', choices=['red', 'green', 'blue'])
     parser.add_argument('--timeout', type=int, default=90)
+    parser.add_argument('--center', type=float, default=0.50)
+    parser.add_argument('--center-tolerance', type=float, default=0.028)
+    parser.add_argument('--target-area', type=float, default=0.042)
+    parser.add_argument('--area-tolerance', type=float, default=0.012)
+    parser.add_argument('--stable-frames', type=int, default=4)
     return parser.parse_args()
 
 
@@ -55,9 +60,15 @@ ros2 launch competition_pick_place "$LAUNCH_FILE" \\
   yolo_conf:=0.70 \\
   search_timeout:=12.0 \\
   align_timeout:=45.0 \\
-  pick_target_area_ratio:=0.052 \\
-  area_tolerance_ratio:=0.014 \\
-  max_linear_speed:=0.08 > "$LOG" 2>&1 &
+  desired_center_x_ratio:={args.center:.4f} \\
+  center_tolerance_ratio:={args.center_tolerance:.4f} \\
+  pick_target_area_ratio:={args.target_area:.4f} \\
+  area_tolerance_ratio:={args.area_tolerance:.4f} \\
+  stable_frames:={int(args.stable_frames)} \\
+  angular_k:=0.80 \\
+  max_linear_speed:=0.06 \\
+  max_angular_speed:=0.25 \\
+  search_angular_speed:=0.12 > "$LOG" 2>&1 &
 LAUNCH_PID=$!
 echo "launch_pid=$LAUNCH_PID"
 
