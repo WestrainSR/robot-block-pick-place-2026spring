@@ -19,6 +19,13 @@ build/
 install/
 log/
 .pytest_cache/
+.cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+*.egg-info/
 
 # Training data and model artifacts are large and should be transferred or
 # versioned with Git LFS only when intentionally needed.
@@ -32,8 +39,22 @@ deployment/competition_blocks_openvino/
 *.engine
 *.bin
 
+# Local runtime state, recordings, and database captures
+*.pid
+*.tmp
+*.bak
+*.db3
+*.sqlite
+*.sqlite3
+rosbag2_*/
+*.bag
+*.mp4
+*.avi
+*.mkv
+
 # Editor and OS noise
 .vscode/
 .idea/
+node_modules/
 Thumbs.db
 .DS_Store
