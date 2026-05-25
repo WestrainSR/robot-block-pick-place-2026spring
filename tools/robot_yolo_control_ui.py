@@ -304,21 +304,45 @@ INDEX_HTML = r'''<!doctype html>
           <input id="center_tolerance" type="number" step="0.001" min="0" max="0.5" value="0.028">
         </label>
         <label>面积目标
-          <input id="target_area" type="number" step="0.001" min="0" max="0.5" value="0.060">
+          <input id="target_area" type="number" step="0.001" min="0" max="0.5" value="0.043">
         </label>
         <label>面积容差
           <input id="area_tolerance" type="number" step="0.001" min="0" max="0.2" value="0.010">
         </label>
+        <label>pick attempts
+          <input id="pick_attempts" type="number" step="1" min="1" max="20" value="3">
+        </label>
+        <label>gripper gap
+          <input id="gripper_gap" type="number" step="1" min="0" max="200" value="30">
+        </label>
+        <label>empty close
+          <input id="empty_close" type="number" step="1" min="0" max="1000" value="500">
+        </label>
+        <label>gripper delay(s)
+          <input id="gripper_delay" type="number" step="0.05" min="0" max="5" value="0.35">
+        </label>
         <label>最大线速度
-          <input id="max_linear" type="number" step="0.01" min="0" max="0.2" value="0.06">
+          <input id="max_linear" type="number" step="0.005" min="0" max="0.2" value="0.035">
         </label>
         <label>最大角速度
-          <input id="max_angular" type="number" step="0.01" min="0" max="0.6" value="0.20">
+          <input id="max_angular" type="number" step="0.01" min="0" max="0.6" value="0.14">
+        </label>
+        <label>visual period(s)
+          <input id="visual_period" type="number" step="0.01" min="0.02" max="0.2" value="0.10">
+        </label>
+        <label>pregrasp scale
+          <input id="pregrasp_scale" type="number" step="0.1" min="0.1" max="5" value="2.4">
+        </label>
+        <label>settle before(s)
+          <input id="pregrasp_settle" type="number" step="0.1" min="0" max="5" value="0.7">
+        </label>
+        <label>settle after(s)
+          <input id="pregrasp_post" type="number" step="0.1" min="0" max="5" value="0.6">
         </label>
         <label>低位目标 cx
           <input id="preclose_center" type="number" step="0.001" min="0" max="1" value="0.90">
         </label>
-        <label>低位面积目标
+        <label>下探跟踪面积
           <input id="preclose_area" type="number" step="0.001" min="0" max="0.5" value="0.095">
         </label>
         <label class="wide">闭环模式
@@ -368,8 +392,16 @@ function params() {
     center_tolerance: Number($('center_tolerance').value),
     target_area: Number($('target_area').value),
     area_tolerance: Number($('area_tolerance').value),
+    pick_attempts: Number($('pick_attempts').value),
+    gripper_gap: Number($('gripper_gap').value),
+    empty_close: Number($('empty_close').value),
+    gripper_delay: Number($('gripper_delay').value),
     max_linear: Number($('max_linear').value),
     max_angular: Number($('max_angular').value),
+    visual_period: Number($('visual_period').value),
+    pregrasp_scale: Number($('pregrasp_scale').value),
+    pregrasp_settle: Number($('pregrasp_settle').value),
+    pregrasp_post: Number($('pregrasp_post').value),
     preclose_center: Number($('preclose_center').value),
     preclose_area: Number($('preclose_area').value),
     control_mode: $('control_mode').value
@@ -650,10 +682,18 @@ def start_pick(robot: Robot, params: dict) -> str:
     control_mode = shlex.quote(str(params.get('control_mode', 'mpc')))
     center = float(params.get('center', 0.50))
     center_tol = float(params.get('center_tolerance', 0.028))
-    target_area = float(params.get('target_area', 0.060))
+    target_area = float(params.get('target_area', 0.043))
     area_tol = float(params.get('area_tolerance', 0.010))
-    max_linear = float(params.get('max_linear', 0.06))
-    max_angular = float(params.get('max_angular', 0.20))
+    pick_attempts = max(1, int(params.get('pick_attempts', 3)))
+    gripper_gap = max(0, int(params.get('gripper_gap', 30)))
+    empty_close = int(params.get('empty_close', 500))
+    gripper_delay = float(params.get('gripper_delay', 0.35))
+    max_linear = float(params.get('max_linear', 0.035))
+    max_angular = float(params.get('max_angular', 0.14))
+    visual_period = float(params.get('visual_period', 0.10))
+    pregrasp_scale = float(params.get('pregrasp_scale', 2.4))
+    pregrasp_settle = float(params.get('pregrasp_settle', 0.7))
+    pregrasp_post = float(params.get('pregrasp_post', 0.6))
     preclose_center = float(params.get('preclose_center', 0.90))
     preclose_area = float(params.get('preclose_area', 0.095))
     script = ros_prefix() + shell_kill_helpers() + f'''
@@ -683,6 +723,9 @@ nohup ros2 launch competition_pick_place competition_run.launch.py \\
   pick_action:=navigation_pick_ai \\
   search_timeout:=12.0 \\
   align_timeout:=45.0 \\
+  wait_for_detection_stream:=true \\
+  detection_stream_timeout:=20.0 \\
+  detection_ready_min_messages:=1 \\
   desired_center_x_ratio:={center:.4f} \\
   center_tolerance_ratio:={center_tol:.4f} \\
   pick_target_area_ratio:={target_area:.4f} \\
@@ -690,19 +733,34 @@ nohup ros2 launch competition_pick_place competition_run.launch.py \\
   stable_frames:=4 \\
   control_mode:={control_mode} \\
   closed_loop_pick:=true \\
+  pick_visual_servo_timeout:=5.0 \\
+  visual_servo_period:={visual_period:.3f} \\
   pick_pregrasp_visual_servo:=true \\
+  pick_pregrasp_time_scale:={pregrasp_scale:.3f} \\
+  pick_pregrasp_min_step_seconds:=0.800 \\
+  pick_pregrasp_settle_seconds:={pregrasp_settle:.3f} \\
+  pick_pregrasp_post_step_seconds:={pregrasp_post:.3f} \\
   pick_preclose_required:=false \\
+  pick_preclose_fail_on_timeout:=false \\
   pick_preclose_center_x_ratio:={preclose_center:.4f} \\
   pick_preclose_target_area_ratio:={preclose_area:.4f} \\
   pick_preclose_center_tolerance_ratio:=0.0650 \\
   pick_preclose_area_tolerance_ratio:=0.0200 \\
   pick_preclose_stable_frames:=1 \\
+  pick_retry_attempts:={pick_attempts} \\
+  grasp_check_enabled:=true \\
+  gripper_state_topic:=/controller_manager/servo_states \\
+  gripper_servo_id:=10 \\
+  gripper_empty_close_position:={empty_close} \\
+  gripper_grasp_min_gap:={gripper_gap} \\
+  gripper_check_delay:={gripper_delay:.3f} \\
+  gripper_feedback_timeout:=2.0 \\
   angular_k:=0.80 \\
   max_linear_speed:={max_linear:.4f} \\
   max_angular_speed:={max_angular:.4f} \\
   search_angular_speed:=0.12 \\
-  mpc_horizon:=6 \\
-  mpc_dt:=0.12 \\
+  mpc_horizon:=8 \\
+  mpc_dt:={visual_period:.3f} \\
   mpc_center_response:=1.05 \\
   mpc_area_response:=0.24 \\
   mpc_center_weight:=8.0 \\

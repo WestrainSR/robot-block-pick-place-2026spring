@@ -18,21 +18,34 @@ def parse_args():
     parser.add_argument('--attempt-timeout', type=int, default=90)
     parser.add_argument('--center', type=float, default=0.50)
     parser.add_argument('--center-tolerance', type=float, default=0.028)
-    parser.add_argument('--target-area', type=float, default=0.060)
+    parser.add_argument('--target-area', type=float, default=0.043)
     parser.add_argument('--area-tolerance', type=float, default=0.010)
     parser.add_argument('--stable-frames', type=int, default=4)
+    parser.add_argument('--detection-stream-timeout', type=float, default=20.0)
     parser.add_argument('--control-mode', default='mpc', choices=['p', 'mpc'])
     parser.add_argument('--closed-loop-pick', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--init-action', default='navigation_pick_init_ai')
     parser.add_argument('--pick-action', default='navigation_pick_ai')
     parser.add_argument('--place-action', default='navigation_place')
     parser.add_argument('--pregrasp-visual-servo', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--visual-servo-period', type=float, default=0.10)
+    parser.add_argument('--pregrasp-time-scale', type=float, default=2.4)
+    parser.add_argument('--pregrasp-min-step-seconds', type=float, default=0.80)
+    parser.add_argument('--pregrasp-settle-seconds', type=float, default=0.70)
+    parser.add_argument('--pregrasp-post-step-seconds', type=float, default=0.60)
     parser.add_argument('--preclose-required', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--preclose-fail-on-timeout', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--preclose-center', type=float, default=0.90)
     parser.add_argument('--preclose-target-area', type=float, default=0.095)
     parser.add_argument('--preclose-center-tolerance', type=float, default=0.065)
     parser.add_argument('--preclose-area-tolerance', type=float, default=0.020)
     parser.add_argument('--preclose-stable-frames', type=int, default=1)
+    parser.add_argument('--pick-retry-attempts', type=int, default=3)
+    parser.add_argument('--gripper-empty-close-position', type=int, default=500)
+    parser.add_argument('--gripper-grasp-min-gap', type=int, default=30)
+    parser.add_argument('--gripper-check-delay', type=float, default=0.35)
+    parser.add_argument('--max-linear-speed', type=float, default=0.035)
+    parser.add_argument('--max-angular-speed', type=float, default=0.14)
     return parser.parse_args()
 
 
@@ -124,6 +137,9 @@ run_attempt() {{
     pick_action:={pick_action} \\
     search_timeout:=12.0 \\
     align_timeout:=45.0 \\
+    wait_for_detection_stream:=true \\
+    detection_stream_timeout:={args.detection_stream_timeout:.1f} \\
+    detection_ready_min_messages:=1 \\
     desired_center_x_ratio:={args.center:.4f} \\
     center_tolerance_ratio:={args.center_tolerance:.4f} \\
     pick_target_area_ratio:={args.target_area:.4f} \\
@@ -131,19 +147,33 @@ run_attempt() {{
     stable_frames:={int(args.stable_frames)} \\
     control_mode:={control_mode} \\
     closed_loop_pick:={bool_text(args.closed_loop_pick)} \\
+    visual_servo_period:={args.visual_servo_period:.3f} \\
     pick_pregrasp_visual_servo:={bool_text(args.pregrasp_visual_servo)} \\
+    pick_pregrasp_time_scale:={args.pregrasp_time_scale:.3f} \\
+    pick_pregrasp_min_step_seconds:={args.pregrasp_min_step_seconds:.3f} \\
+    pick_pregrasp_settle_seconds:={args.pregrasp_settle_seconds:.3f} \\
+    pick_pregrasp_post_step_seconds:={args.pregrasp_post_step_seconds:.3f} \\
     pick_preclose_required:={bool_text(args.preclose_required)} \\
+    pick_preclose_fail_on_timeout:={bool_text(args.preclose_fail_on_timeout)} \\
     pick_preclose_center_x_ratio:={args.preclose_center:.4f} \\
     pick_preclose_target_area_ratio:={args.preclose_target_area:.4f} \\
     pick_preclose_center_tolerance_ratio:={args.preclose_center_tolerance:.4f} \\
     pick_preclose_area_tolerance_ratio:={args.preclose_area_tolerance:.4f} \\
     pick_preclose_stable_frames:={int(args.preclose_stable_frames)} \\
+    pick_retry_attempts:={int(args.pick_retry_attempts)} \\
+    grasp_check_enabled:=true \\
+    gripper_state_topic:=/controller_manager/servo_states \\
+    gripper_servo_id:=10 \\
+    gripper_empty_close_position:={int(args.gripper_empty_close_position)} \\
+    gripper_grasp_min_gap:={int(args.gripper_grasp_min_gap)} \\
+    gripper_check_delay:={args.gripper_check_delay:.3f} \\
+    gripper_feedback_timeout:=2.0 \\
     angular_k:=0.80 \\
-    max_linear_speed:=0.06 \\
-    max_angular_speed:=0.20 \\
+    max_linear_speed:={args.max_linear_speed:.4f} \\
+    max_angular_speed:={args.max_angular_speed:.4f} \\
     search_angular_speed:=0.12 \\
-    mpc_horizon:=6 \\
-    mpc_dt:=0.12 \\
+    mpc_horizon:=8 \\
+    mpc_dt:={args.visual_servo_period:.3f} \\
     mpc_center_response:=1.05 \\
     mpc_area_response:=0.24 \\
     mpc_center_weight:=8.0 \\

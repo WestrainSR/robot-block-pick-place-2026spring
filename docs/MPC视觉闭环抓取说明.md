@@ -77,18 +77,31 @@ dt = 0.06
 
 `horizon * dt` 是预测窗口。当前默认 `10 * 0.06 = 0.60s`；实机绿色脚本是 `10 * 0.05 = 0.50s`。相比旧配置 `6 * 0.12 = 0.72s`，新配置的预测步长更接近实际控制周期，输出会更细、更及时。
 
+## YOLO 启动等待
+
+启动抓取后，节点会先等待 `/yolo_node/object_detect` 检测流 ready：
+
+```text
+wait_for_detection_stream=true
+detection_stream_timeout=20.0
+detection_ready_min_messages=1
+```
+
+检测流 ready 之前，底盘只发布零速度，避免 YOLO 节点还在启动时机器人原地左右搜索。收到检测流消息后，如果目标类别仍然不可见，才进入搜索旋转。
+
 ## 低位视觉限制
 
 实测发现，夹爪下探到低位后，相机会出现目标不可见或被夹爪遮挡的情况。因此绿色实机脚本当前策略是：
 
 ```text
-pick_preclose_required:=true
+pick_preclose_required:=false
 pick_preclose_fail_on_timeout:=false
 ```
 
-也就是闭爪前做一次短暂确认：如果低位仍能看到目标，就继续 MPC 对准；如果目标被夹爪遮挡或短时间内丢失，则停车并继续闭爪，不把整次任务判失败。若后续调整相机或姿态，使低位也能稳定看见方块，可以改为：
+也就是到低位后直接闭爪，不再等待低位面积目标。实机观察表明夹爪下探到最低后相机容易看不到方块，继续等待 YOLO 框会造成闭爪延迟。若后续调整相机或姿态，使低位也能稳定看见方块，可以重新打开闭爪前确认：
 
 ```text
+pick_preclose_required:=true
 pick_preclose_fail_on_timeout:=true
 ```
 
@@ -111,19 +124,19 @@ pick_action=navigation_pick_ai
 control_mode=mpc
 closed_loop_pick=true
 pick_pregrasp_visual_servo=true
-pick_preclose_required=true
+pick_preclose_required=false
 pick_preclose_fail_on_timeout=false
 desired_center_x_ratio=0.50
-pick_target_area_ratio=0.042
+pick_target_area_ratio=0.043
 pick_preclose_center_x_ratio=0.90
-pick_preclose_target_area_ratio=0.073
-max_linear_speed=0.06
-max_angular_speed=0.20
-visual_servo_period=0.05
-pick_pregrasp_time_scale=1.6
-pick_pregrasp_min_step_seconds=0.45
-mpc_horizon=10
-mpc_dt=0.05
+pick_preclose_target_area_ratio=0.095
+max_linear_speed=0.035
+max_angular_speed=0.14
+visual_servo_period=0.10
+pick_pregrasp_time_scale=2.4
+pick_pregrasp_min_step_seconds=0.80
+mpc_horizon=8
+mpc_dt=0.10
 ```
 
 ## 调参前实机日志结论

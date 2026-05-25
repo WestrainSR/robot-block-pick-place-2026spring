@@ -25,9 +25,10 @@ except Exception:  # pragma: no cover - only used on the robot image.
 
 try:
     from servo_controller.action_group_controller import ActionGroupController
-    from servo_controller_msgs.msg import ServosPosition
+    from servo_controller_msgs.msg import ServoStateList, ServosPosition
 except Exception:  # pragma: no cover - dry-run can still start without arm libs.
     ActionGroupController = None
+    ServoStateList = None
     ServosPosition = None
 
 
@@ -82,8 +83,12 @@ class CompetitionPickPlace(Node):
         self.phase = Phase.INIT
         self.shutdown_requested = False
         self.detection_lock = threading.Lock()
+        self.servo_state_lock = threading.Lock()
         self.latest_detections: Dict[str, Detection] = {}
         self.last_msg_time = 0.0
+        self.detection_message_count = 0
+        self.latest_servo_positions: Dict[int, int] = {}
+        self.last_servo_state_time = 0.0
 
         share_dir = get_package_share_directory('competition_pick_place')
         self.declare_parameter('target_class', 'red')
@@ -105,9 +110,12 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('place_align_timeout', 18.0)
         self.declare_parameter('nav_timeout', 180.0)
         self.declare_parameter('detection_stale_seconds', 0.8)
+        self.declare_parameter('wait_for_detection_stream', True)
+        self.declare_parameter('detection_stream_timeout', 20.0)
+        self.declare_parameter('detection_ready_min_messages', 1)
         self.declare_parameter('desired_center_x_ratio', 0.50)
         self.declare_parameter('center_tolerance_ratio', 0.055)
-        self.declare_parameter('pick_target_area_ratio', 0.095)
+        self.declare_parameter('pick_target_area_ratio', 0.043)
         self.declare_parameter('place_target_area_ratio', 0.080)
         self.declare_parameter('area_tolerance_ratio', 0.018)
         self.declare_parameter('stable_frames', 5)
@@ -118,8 +126,10 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('pick_pregrasp_visual_servo', True)
         self.declare_parameter('pick_pregrasp_time_scale', 1.0)
         self.declare_parameter('pick_pregrasp_min_step_seconds', 0.0)
-        self.declare_parameter('pick_preclose_required', True)
-        self.declare_parameter('pick_preclose_fail_on_timeout', True)
+        self.declare_parameter('pick_pregrasp_settle_seconds', 0.0)
+        self.declare_parameter('pick_pregrasp_post_step_seconds', 0.0)
+        self.declare_parameter('pick_preclose_required', False)
+        self.declare_parameter('pick_preclose_fail_on_timeout', False)
         self.declare_parameter('pick_preclose_center_x_ratio', 0.50)
         self.declare_parameter('pick_preclose_target_area_ratio', -1.0)
         self.declare_parameter('pick_preclose_center_tolerance_ratio', -1.0)
@@ -128,6 +138,14 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('pick_pregrasp_steps', '1,2')
         self.declare_parameter('pick_close_steps', '3,4')
         self.declare_parameter('pick_lift_steps', '5,6')
+        self.declare_parameter('pick_retry_attempts', 3)
+        self.declare_parameter('grasp_check_enabled', True)
+        self.declare_parameter('gripper_state_topic', '/controller_manager/servo_states')
+        self.declare_parameter('gripper_servo_id', 10)
+        self.declare_parameter('gripper_empty_close_position', 500)
+        self.declare_parameter('gripper_grasp_min_gap', 30)
+        self.declare_parameter('gripper_check_delay', 0.35)
+        self.declare_parameter('gripper_feedback_timeout', 2.0)
         self.declare_parameter('linear_k', 0.42)
         self.declare_parameter('angular_k', 1.35)
         self.declare_parameter('max_linear_speed', 0.10)
@@ -177,6 +195,13 @@ class CompetitionPickPlace(Node):
             self.detection_callback,
             10,
         )
+        if ServoStateList is not None:
+            self.create_subscription(
+                ServoStateList,
+                str(self.get_parameter('gripper_state_topic').value),
+                self.servo_state_callback,
+                10,
+            )
         self.create_service(Trigger, '~/stop', self.stop_callback)
         self.create_service(Trigger, '~/init_finish', self.init_finish_callback)
 
@@ -249,6 +274,16 @@ class CompetitionPickPlace(Node):
         with self.detection_lock:
             self.latest_detections = fresh
             self.last_msg_time = now
+            self.detection_message_count += 1
+
+    def servo_state_callback(self, msg) -> None:
+        now = time.monotonic()
+        positions: Dict[int, int] = {}
+        for state in msg.servo_state:
+            positions[int(state.id)] = int(state.position)
+        with self.servo_state_lock:
+            self.latest_servo_positions = positions
+            self.last_servo_state_time = now
 
     def detection_rank(self, det: Detection) -> float:
         center_error = abs(det.cx_ratio - float(self.get_parameter('desired_center_x_ratio').value))
@@ -424,6 +459,7 @@ class CompetitionPickPlace(Node):
             )
             return
 
+        self.wait_until_detection_stream_ready(label, timeout)
         start = time.monotonic()
         found_deadline = start + min(float(self.get_parameter('search_timeout').value), timeout)
         align_deadline = start + timeout
@@ -486,6 +522,40 @@ class CompetitionPickPlace(Node):
             time.sleep(period)
 
         raise RuntimeError('stop requested during alignment')
+
+    def wait_until_detection_stream_ready(self, label: str, align_timeout: float) -> None:
+        if not bool(self.get_parameter('wait_for_detection_stream').value):
+            return
+        min_messages = max(1, int(self.get_parameter('detection_ready_min_messages').value))
+        timeout = min(float(self.get_parameter('detection_stream_timeout').value), max(1.0, align_timeout))
+        deadline = time.monotonic() + timeout
+        period = self.visual_servo_period_seconds()
+        last_log = 0.0
+        while rclpy.ok() and not self.shutdown_requested:
+            with self.detection_lock:
+                count = self.detection_message_count
+                last_msg_age = time.monotonic() - self.last_msg_time if self.last_msg_time > 0.0 else float('inf')
+                visible = sorted(self.latest_detections)
+            if count >= min_messages and last_msg_age <= self.stale_seconds:
+                self.get_logger().info(
+                    f'YOLO detection stream ready for {label}: messages={count}, visible={visible}'
+                )
+                return
+            now = time.monotonic()
+            if now > deadline:
+                raise RuntimeError(
+                    f'YOLO detection stream not ready before {timeout:.1f}s for {label}; '
+                    f'messages={count}, visible={visible}'
+                )
+            self.stop_robot()
+            if now - last_log > 1.0:
+                publisher_count = self.count_publishers(str(self.get_parameter('detection_topic').value))
+                self.get_logger().info(
+                    f'waiting YOLO detection stream for {label}: '
+                    f'publishers={publisher_count}, messages={count}, visible={visible}'
+                )
+                last_log = now
+            time.sleep(period)
 
     def compute_visual_servo_twist(self, center_error: float, area_error: float, center_tol: float) -> Twist:
         if self.control_mode == 'mpc':
@@ -610,10 +680,11 @@ class CompetitionPickPlace(Node):
         pregrasp_steps = self.parse_step_indices(self.get_parameter('pick_pregrasp_steps').value)
         close_steps = self.parse_step_indices(self.get_parameter('pick_close_steps').value)
         lift_steps = self.parse_step_indices(self.get_parameter('pick_lift_steps').value)
+        retry_attempts = max(1, int(self.get_parameter('pick_retry_attempts').value))
 
         self.get_logger().info(
             f'closed-loop pick {label}: pregrasp={pregrasp_steps}, close={close_steps}, '
-            f'lift={lift_steps}, mode={self.control_mode}'
+            f'lift={lift_steps}, attempts={retry_attempts}, mode={self.control_mode}'
         )
         preclose_area = float(self.get_parameter('pick_preclose_target_area_ratio').value)
         if preclose_area <= 0.0:
@@ -626,38 +697,60 @@ class CompetitionPickPlace(Node):
             preclose_area_tol = float(self.get_parameter('area_tolerance_ratio').value)
 
         preclose_center = float(self.get_parameter('pick_preclose_center_x_ratio').value)
-        if bool(self.get_parameter('pick_pregrasp_visual_servo').value):
-            self.run_action_group_steps_with_visual_servo(
-                pick_action,
-                pregrasp_steps,
-                target_names,
-                f'{label} pregrasp',
-                desired_center=preclose_center,
-                target_area=preclose_area,
-                center_tolerance=preclose_center_tol,
-            )
-        else:
-            self.run_action_group_steps(pick_action, pregrasp_steps, f'{label} pregrasp')
-
-        if bool(self.get_parameter('pick_preclose_required').value):
-            try:
+        for attempt in range(1, retry_attempts + 1):
+            attempt_label = f'{label} attempt {attempt}/{retry_attempts}'
+            if attempt > 1:
+                self.get_logger().info(f'{attempt_label}: realigning target before retry')
                 self.visual_servo_to_classes(
                     names=target_names,
-                    timeout=float(self.get_parameter('pick_visual_servo_timeout').value),
-                    target_area=preclose_area,
-                    label=f'{label} pre-close',
+                    timeout=float(self.get_parameter('align_timeout').value),
+                    target_area=float(self.get_parameter('pick_target_area_ratio').value),
+                    label=f'{attempt_label} retry align',
+                )
+
+            if bool(self.get_parameter('pick_pregrasp_visual_servo').value):
+                self.run_action_group_steps_with_visual_servo(
+                    pick_action,
+                    pregrasp_steps,
+                    target_names,
+                    f'{attempt_label} pregrasp',
                     desired_center=preclose_center,
+                    target_area=preclose_area,
                     center_tolerance=preclose_center_tol,
                     area_tolerance=preclose_area_tol,
-                    stable_frames=int(self.get_parameter('pick_preclose_stable_frames').value),
                 )
-            except RuntimeError as exc:
-                self.stop_robot()
-                if bool(self.get_parameter('pick_preclose_fail_on_timeout').value):
-                    raise
-                self.get_logger().warn(f'best-effort {label} pre-close skipped: {exc}')
-        self.run_action_group_steps(pick_action, close_steps, f'{label} close')
-        self.run_action_group_steps(pick_action, lift_steps, f'{label} lift')
+            else:
+                self.run_action_group_steps(pick_action, pregrasp_steps, f'{attempt_label} pregrasp')
+
+            if bool(self.get_parameter('pick_preclose_required').value):
+                try:
+                    self.visual_servo_to_classes(
+                        names=target_names,
+                        timeout=float(self.get_parameter('pick_visual_servo_timeout').value),
+                        target_area=preclose_area,
+                        label=f'{attempt_label} pre-close',
+                        desired_center=preclose_center,
+                        center_tolerance=preclose_center_tol,
+                        area_tolerance=preclose_area_tol,
+                        stable_frames=int(self.get_parameter('pick_preclose_stable_frames').value),
+                    )
+                except RuntimeError as exc:
+                    self.stop_robot()
+                    if bool(self.get_parameter('pick_preclose_fail_on_timeout').value):
+                        raise
+                    self.get_logger().warn(f'best-effort {attempt_label} pre-close skipped: {exc}')
+
+            self.run_action_group_steps(pick_action, close_steps, f'{attempt_label} close')
+            if self.grasp_succeeded(attempt_label):
+                self.run_action_group_steps(pick_action, lift_steps, f'{attempt_label} lift')
+                return
+
+            if attempt < retry_attempts:
+                self.get_logger().warn(f'{attempt_label}: grasp check says empty; lifting clear and retrying')
+                self.run_action_group_steps(pick_action, lift_steps, f'{attempt_label} failed lift-clear')
+            else:
+                self.run_action_group_steps(pick_action, lift_steps, f'{attempt_label} final lift-clear')
+                raise RuntimeError(f'{label} failed after {retry_attempts} grasp attempts')
 
     def parse_step_indices(self, value) -> List[int]:
         if value is None:
@@ -676,6 +769,49 @@ class CompetitionPickPlace(Node):
                 raise RuntimeError(f'action step index must be positive, got {index}')
             result.append(index)
         return result
+
+    def grasp_succeeded(self, label: str) -> bool:
+        if not bool(self.get_parameter('grasp_check_enabled').value):
+            self.get_logger().info(f'{label}: grasp check disabled; assuming success')
+            return True
+
+        gripper_id = int(self.get_parameter('gripper_servo_id').value)
+        empty_close = int(self.get_parameter('gripper_empty_close_position').value)
+        min_gap = max(0, int(self.get_parameter('gripper_grasp_min_gap').value))
+        delay = max(0.0, float(self.get_parameter('gripper_check_delay').value))
+        timeout = max(0.1, float(self.get_parameter('gripper_feedback_timeout').value))
+        if delay > 0.0:
+            time.sleep(delay)
+
+        sample_after = time.monotonic()
+        deadline = sample_after + timeout
+        last_log = 0.0
+        while rclpy.ok() and not self.shutdown_requested and time.monotonic() < deadline:
+            with self.servo_state_lock:
+                position = self.latest_servo_positions.get(gripper_id)
+                stamp = self.last_servo_state_time
+            now = time.monotonic()
+            if position is not None and stamp >= sample_after:
+                gap = empty_close - position
+                success = gap >= min_gap
+                result = 'success' if success else 'empty'
+                self.get_logger().info(
+                    f'{label}: grasp check {result}: gripper_id={gripper_id}, '
+                    f'position={position}, empty_close={empty_close}, gap={gap}, min_gap={min_gap}'
+                )
+                return success
+            if now - last_log > 0.5:
+                self.get_logger().info(
+                    f'{label}: waiting gripper feedback id={gripper_id}; '
+                    f'latest_position={position}, age={now - stamp if stamp > 0 else float("inf"):.2f}s'
+                )
+                last_log = now
+            time.sleep(0.05)
+
+        self.get_logger().warn(
+            f'{label}: no fresh gripper feedback within {timeout:.1f}s; assuming success to avoid unsafe retry'
+        )
+        return True
 
     def run_action_group_steps(self, action_name: str, step_indices: Sequence[int], label: str) -> None:
         if not step_indices:
@@ -711,6 +847,7 @@ class CompetitionPickPlace(Node):
         desired_center: float,
         target_area: float,
         center_tolerance: float,
+        area_tolerance: Optional[float] = None,
     ) -> None:
         if not step_indices:
             self.get_logger().warn(f'no action steps configured for {label}')
@@ -730,33 +867,69 @@ class CompetitionPickPlace(Node):
             raise RuntimeError(f'{label}: requested steps {list(step_indices)} not in action group {available}')
 
         names = set(target_names)
+        time_scale = self.pregrasp_time_scale()
+        min_step = self.pregrasp_min_step_seconds()
+        settle_seconds = self.pregrasp_settle_seconds()
+        post_step_seconds = self.pregrasp_post_step_seconds()
         self.get_logger().info(
             f'run visual-servo action steps {action_name} {list(step_indices)} for {label}: '
             f'desired_cx={desired_center:.3f}, target_area={target_area:.3f}, '
             f'period={self.visual_servo_period_seconds():.3f}s, '
-            f'time_scale={float(self.get_parameter("pick_pregrasp_time_scale").value):.2f}, '
-            f'min_step={float(self.get_parameter("pick_pregrasp_min_step_seconds").value):.2f}s'
+            f'time_scale={time_scale:.2f}, min_step={min_step:.2f}s, '
+            f'settle={settle_seconds:.2f}s, post_step={post_step_seconds:.2f}s'
         )
-        for row in selected:
+        for row_index, row in enumerate(selected):
             if self.shutdown_requested:
                 raise RuntimeError('stop requested during visual-servo action steps')
+            step_label = f'{label} step {int(row[0])}'
+            if settle_seconds > 1e-6:
+                self.track_target_for_duration(
+                    names=names,
+                    duration=settle_seconds,
+                    desired_center=desired_center,
+                    target_area=target_area,
+                    center_tolerance=center_tolerance,
+                    area_tolerance=area_tolerance,
+                    label=f'{step_label} settle-before',
+                )
             duration = self.pregrasp_tracking_duration(row)
-            self.publish_servo_row(row, wait=False)
+            self.publish_servo_row(row, wait=False, duration_scale=time_scale)
             self.track_target_for_duration(
                 names=names,
                 duration=duration,
                 desired_center=desired_center,
                 target_area=target_area,
                 center_tolerance=center_tolerance,
-                label=label,
+                area_tolerance=area_tolerance,
+                label=step_label,
             )
+            if post_step_seconds > 1e-6 and row_index < len(selected) - 1:
+                self.track_target_for_duration(
+                    names=names,
+                    duration=post_step_seconds,
+                    desired_center=desired_center,
+                    target_area=target_area,
+                    center_tolerance=center_tolerance,
+                    area_tolerance=area_tolerance,
+                    label=f'{step_label} settle-after',
+                )
         self.stop_robot()
 
     def pregrasp_tracking_duration(self, row: Sequence[int]) -> float:
         base_duration = max(0.05, float(row[1]) / 1000.0)
-        time_scale = max(0.1, float(self.get_parameter('pick_pregrasp_time_scale').value))
-        min_duration = max(0.0, float(self.get_parameter('pick_pregrasp_min_step_seconds').value))
-        return max(base_duration * time_scale, min_duration)
+        return max(base_duration * self.pregrasp_time_scale(), self.pregrasp_min_step_seconds())
+
+    def pregrasp_time_scale(self) -> float:
+        return max(0.1, float(self.get_parameter('pick_pregrasp_time_scale').value))
+
+    def pregrasp_min_step_seconds(self) -> float:
+        return max(0.0, float(self.get_parameter('pick_pregrasp_min_step_seconds').value))
+
+    def pregrasp_settle_seconds(self) -> float:
+        return max(0.0, float(self.get_parameter('pick_pregrasp_settle_seconds').value))
+
+    def pregrasp_post_step_seconds(self) -> float:
+        return max(0.0, float(self.get_parameter('pick_pregrasp_post_step_seconds').value))
 
     def track_target_for_duration(
         self,
@@ -766,6 +939,7 @@ class CompetitionPickPlace(Node):
         target_area: float,
         center_tolerance: float,
         label: str,
+        area_tolerance: Optional[float] = None,
     ) -> None:
         deadline = time.monotonic() + duration
         period = self.visual_servo_period_seconds()
@@ -783,6 +957,16 @@ class CompetitionPickPlace(Node):
 
             center_error = det.cx_ratio - desired_center
             area_error = target_area - det.area_ratio
+            if area_tolerance is not None and abs(center_error) <= center_tolerance and abs(area_error) <= area_tolerance:
+                self.stop_robot()
+                if now - last_log > 0.45:
+                    self.get_logger().info(
+                        f'visual-servo {label}: holding alignment class={det.class_name} '
+                        f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f}'
+                    )
+                    last_log = now
+                time.sleep(period)
+                continue
             twist = self.compute_visual_servo_twist(center_error, area_error, center_tolerance)
             self.cmd_pub.publish(twist)
             self.last_twist = twist
@@ -809,12 +993,12 @@ class CompetitionPickPlace(Node):
             raise RuntimeError(f'action group has no steps: {path}')
         return rows
 
-    def publish_servo_row(self, row: Sequence[int], wait: bool = True) -> None:
+    def publish_servo_row(self, row: Sequence[int], wait: bool = True, duration_scale: float = 1.0) -> None:
         if len(row) < 8:
             raise RuntimeError(f'invalid action row: {row!r}')
         msg = ServosPosition()
         msg.position_unit = 'pulse'
-        msg.duration = float(row[1]) / 1000.0
+        msg.duration = max(0.05, float(row[1]) / 1000.0 * max(0.1, float(duration_scale)))
         positions = []
         for offset, value in enumerate(row[2:8], start=1):
             servo = self.make_servo_position(10 if offset == 6 else offset, float(value))
