@@ -2,6 +2,7 @@
 import math
 import os
 import sqlite3
+import struct
 import threading
 import time
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from geometry_msgs.msg import PoseStamped, Twist
 from interfaces.msg import ObjectsInfo
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
 
 try:
@@ -54,6 +56,7 @@ class Detection:
     width: int
     height: int
     stamp: float
+    seq: int
 
     @property
     def cx_ratio(self) -> float:
@@ -70,6 +73,16 @@ class Detection:
         return (box_w * box_h) / max(1, self.width * self.height)
 
 
+@dataclass
+class DistanceEstimate:
+    error: float
+    aligned: bool
+    source: str
+    value: Optional[float]
+    target: float
+    tolerance: float
+
+
 class CompetitionPickPlace(Node):
     VALID_TARGETS = {'red', 'green', 'blue'}
 
@@ -83,10 +96,15 @@ class CompetitionPickPlace(Node):
         self.phase = Phase.INIT
         self.shutdown_requested = False
         self.detection_lock = threading.Lock()
+        self.depth_lock = threading.Lock()
         self.servo_state_lock = threading.Lock()
         self.latest_detections: Dict[str, Detection] = {}
+        self.latest_depth_msg: Optional[Image] = None
         self.last_msg_time = 0.0
+        self.last_depth_time = 0.0
         self.detection_message_count = 0
+        self.depth_message_count = 0
+        self.detection_period_ema = 0.0
         self.latest_servo_positions: Dict[int, int] = {}
         self.last_servo_state_time = 0.0
 
@@ -103,6 +121,18 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('waypoints_yaml', os.path.join(share_dir, 'config', 'competition_waypoints.yaml'))
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('detection_topic', '/yolo_node/object_detect')
+        self.declare_parameter('use_depth_distance', True)
+        self.declare_parameter('depth_topic', '/ascamera/camera_publisher/depth0/image_raw')
+        self.declare_parameter('depth_stale_seconds', 0.8)
+        self.declare_parameter('depth_unit_scale', 0.001)
+        self.declare_parameter('depth_roi_scale', 0.45)
+        self.declare_parameter('depth_sample_grid', 5)
+        self.declare_parameter('depth_min_valid_samples', 3)
+        self.declare_parameter('depth_min_m', 0.08)
+        self.declare_parameter('depth_max_m', 1.50)
+        self.declare_parameter('pick_target_depth_m', 0.32)
+        self.declare_parameter('pick_depth_tolerance_m', 0.025)
+        self.declare_parameter('pick_preclose_target_depth_m', -1.0)
         self.declare_parameter('cmd_vel_topic', '/controller/cmd_vel')
         self.declare_parameter('min_score', 0.70)
         self.declare_parameter('search_timeout', 18.0)
@@ -123,6 +153,12 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('closed_loop_pick', False)
         self.declare_parameter('pick_visual_servo_timeout', 10.0)
         self.declare_parameter('visual_servo_period', 0.06)
+        self.declare_parameter('visual_servo_command_seconds', 0.05)
+        self.declare_parameter('adaptive_servo_timing', True)
+        self.declare_parameter('visual_servo_min_period', 0.035)
+        self.declare_parameter('visual_servo_max_period', 0.16)
+        self.declare_parameter('visual_servo_period_scale', 1.05)
+        self.declare_parameter('require_fresh_detection_for_control', True)
         self.declare_parameter('pick_pregrasp_visual_servo', True)
         self.declare_parameter('pick_pregrasp_time_scale', 1.0)
         self.declare_parameter('pick_pregrasp_min_step_seconds', 0.0)
@@ -195,6 +231,13 @@ class CompetitionPickPlace(Node):
             self.detection_callback,
             10,
         )
+        if bool(self.get_parameter('use_depth_distance').value):
+            self.create_subscription(
+                Image,
+                str(self.get_parameter('depth_topic').value),
+                self.depth_callback,
+                5,
+            )
         if ServoStateList is not None:
             self.create_subscription(
                 ServoStateList,
@@ -255,6 +298,7 @@ class CompetitionPickPlace(Node):
     def detection_callback(self, msg: ObjectsInfo) -> None:
         now = time.monotonic()
         fresh: Dict[str, Detection] = {}
+        seq = self.detection_message_count + 1
         for obj in msg.objects:
             if obj.score < self.min_score or len(obj.box) < 4:
                 continue
@@ -267,14 +311,27 @@ class CompetitionPickPlace(Node):
                 width=int(width),
                 height=int(height),
                 stamp=now,
+                seq=seq,
             )
             old = fresh.get(det.class_name)
             if old is None or self.detection_rank(det) > self.detection_rank(old):
                 fresh[det.class_name] = det
         with self.detection_lock:
+            if self.last_msg_time > 0.0:
+                interval = max(0.001, now - self.last_msg_time)
+                if self.detection_period_ema <= 0.0:
+                    self.detection_period_ema = interval
+                else:
+                    self.detection_period_ema = 0.75 * self.detection_period_ema + 0.25 * interval
             self.latest_detections = fresh
             self.last_msg_time = now
             self.detection_message_count += 1
+
+    def depth_callback(self, msg: Image) -> None:
+        with self.depth_lock:
+            self.latest_depth_msg = msg
+            self.last_depth_time = time.monotonic()
+            self.depth_message_count += 1
 
     def servo_state_callback(self, msg) -> None:
         now = time.monotonic()
@@ -323,6 +380,8 @@ class CompetitionPickPlace(Node):
                     timeout=float(self.get_parameter('align_timeout').value),
                     target_area=float(self.get_parameter('pick_target_area_ratio').value),
                     label=f'{target} pick target',
+                    target_depth=float(self.get_parameter('pick_target_depth_m').value),
+                    depth_tolerance=float(self.get_parameter('pick_depth_tolerance_m').value),
                 )
 
                 self.set_phase(Phase.PICK, f'{prefix}: running pick controller')
@@ -434,6 +493,8 @@ class CompetitionPickPlace(Node):
         center_tolerance: Optional[float] = None,
         area_tolerance: Optional[float] = None,
         stable_frames: Optional[int] = None,
+        target_depth: Optional[float] = None,
+        depth_tolerance: Optional[float] = None,
     ) -> None:
         names = set(names)
         desired_center = (
@@ -451,11 +512,17 @@ class CompetitionPickPlace(Node):
             if area_tolerance is None
             else float(area_tolerance)
         )
+        target_depth = self.valid_optional_depth(target_depth)
+        depth_tolerance = (
+            max(0.001, float(self.get_parameter('pick_depth_tolerance_m').value))
+            if depth_tolerance is None
+            else max(0.001, float(depth_tolerance))
+        )
         stable_required = self.stable_frames if stable_frames is None else max(1, int(stable_frames))
         if self.dry_run:
             self.get_logger().info(
                 f'dry-run visual servo {label}: names={sorted(names)}, target_area={target_area}, '
-                f'desired_center={desired_center}, control_mode={self.control_mode}'
+                f'target_depth={target_depth}, desired_center={desired_center}, control_mode={self.control_mode}'
             )
             return
 
@@ -467,6 +534,9 @@ class CompetitionPickPlace(Node):
         stable = 0
         last_log = 0.0
         found_once = False
+        last_control_seq = -1
+        center_tol = center_tolerance
+        area_tol = area_tolerance
 
         while rclpy.ok() and not self.shutdown_requested:
             det = self.best_detection(names)
@@ -479,11 +549,10 @@ class CompetitionPickPlace(Node):
                     raise RuntimeError(f'{label} not found before alignment timeout')
                 if not found_once and now > found_deadline:
                     raise RuntimeError(f'{label} not found before search timeout')
-                self.publish_search_twist()
+                self.publish_search_twist(period)
                 if now - last_log > 1.5:
                     self.get_logger().info(f'searching {label}; detections={self.visible_classes()}')
                     last_log = now
-                time.sleep(period)
                 continue
 
             found_once = True
@@ -491,35 +560,45 @@ class CompetitionPickPlace(Node):
                 raise RuntimeError(f'{label} alignment timeout')
 
             center_error = det.cx_ratio - desired_center
-            area_error = target_area - det.area_ratio
-            center_tol = center_tolerance
-            area_tol = area_tolerance
+            if self.should_wait_for_fresh_detection(det, last_control_seq):
+                self.stop_robot()
+                time.sleep(period)
+                continue
+            last_control_seq = det.seq
+            distance = self.distance_estimate_for_detection(
+                det,
+                target_area=target_area,
+                area_tolerance=area_tol,
+                target_depth=target_depth,
+                depth_tolerance=depth_tolerance,
+            )
 
-            if abs(center_error) <= center_tol and abs(area_error) <= area_tol:
+            if abs(center_error) <= center_tol and distance.aligned:
                 stable += 1
                 self.stop_robot()
                 if stable >= stable_required:
                     self.get_logger().info(
                         f'{label} aligned: class={det.class_name}, score={det.score:.2f}, '
                         f'cx={det.cx_ratio:.3f}, area={det.area_ratio:.3f}, '
-                        f'desired_cx={desired_center:.3f}, target_area={target_area:.3f}'
+                        f'distance_source={distance.source}, value={self.format_optional(distance.value)}, '
+                        f'target={distance.target:.3f}, desired_cx={desired_center:.3f}'
                     )
                     return
                 time.sleep(period)
                 continue
 
             stable = 0
-            twist = self.compute_visual_servo_twist(center_error, area_error, center_tol)
-            self.cmd_pub.publish(twist)
-            self.last_twist = twist
+            twist = self.compute_visual_servo_twist(center_error, distance.error, center_tol)
             if now - last_log > 0.8:
                 self.get_logger().info(
                     f'visual servo {label}: mode={self.control_mode} class={det.class_name} score={det.score:.2f} '
                     f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f} '
+                    f'distance_source={distance.source} value={self.format_optional(distance.value)} '
+                    f'target={distance.target:.3f} error={distance.error:.3f} '
                     f'cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})'
                 )
                 last_log = now
-            time.sleep(period)
+            self.publish_control_pulse(twist, period)
 
         raise RuntimeError('stop requested during alignment')
 
@@ -561,6 +640,137 @@ class CompetitionPickPlace(Node):
         if self.control_mode == 'mpc':
             return self.compute_mpc_twist(center_error, area_error, center_tol)
         return self.compute_p_twist(center_error, area_error, center_tol)
+
+    def should_wait_for_fresh_detection(self, det: Detection, last_control_seq: int) -> bool:
+        return (
+            bool(self.get_parameter('require_fresh_detection_for_control').value)
+            and last_control_seq >= 0
+            and det.seq <= last_control_seq
+        )
+
+    def valid_optional_depth(self, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        depth = float(value)
+        return depth if depth > 0.0 else None
+
+    def distance_estimate_for_detection(
+        self,
+        det: Detection,
+        target_area: float,
+        area_tolerance: float,
+        target_depth: Optional[float],
+        depth_tolerance: Optional[float],
+    ) -> DistanceEstimate:
+        depth_target = self.valid_optional_depth(target_depth)
+        if bool(self.get_parameter('use_depth_distance').value) and depth_target is not None:
+            depth_m = self.estimate_detection_depth_m(det)
+            if depth_m is not None:
+                tolerance = max(0.001, float(depth_tolerance or self.get_parameter('pick_depth_tolerance_m').value))
+                error = depth_m - depth_target
+                return DistanceEstimate(
+                    error=error,
+                    aligned=abs(error) <= tolerance,
+                    source='depth',
+                    value=depth_m,
+                    target=depth_target,
+                    tolerance=tolerance,
+                )
+
+        error = target_area - det.area_ratio
+        return DistanceEstimate(
+            error=error,
+            aligned=abs(error) <= area_tolerance,
+            source='area',
+            value=det.area_ratio,
+            target=target_area,
+            tolerance=area_tolerance,
+        )
+
+    def estimate_detection_depth_m(self, det: Detection) -> Optional[float]:
+        now = time.monotonic()
+        with self.depth_lock:
+            msg = self.latest_depth_msg
+            stamp = self.last_depth_time
+        if msg is None or now - stamp > float(self.get_parameter('depth_stale_seconds').value):
+            return None
+        return self.sample_depth_roi_m(msg, det)
+
+    def sample_depth_roi_m(self, msg: Image, det: Detection) -> Optional[float]:
+        encoding = str(msg.encoding or '').upper()
+        if encoding not in {'16UC1', 'MONO16', '32FC1'}:
+            return None
+        if msg.width <= 0 or msg.height <= 0 or msg.step <= 0:
+            return None
+
+        scale_x = float(msg.width) / max(1, det.width)
+        scale_y = float(msg.height) / max(1, det.height)
+        x1 = self.clamp(det.box[0] * scale_x, 0, msg.width - 1)
+        y1 = self.clamp(det.box[1] * scale_y, 0, msg.height - 1)
+        x2 = self.clamp(det.box[2] * scale_x, 0, msg.width - 1)
+        y2 = self.clamp(det.box[3] * scale_y, 0, msg.height - 1)
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        roi_scale = self.clamp(float(self.get_parameter('depth_roi_scale').value), 0.05, 1.0)
+        half_w = max(1.0, (x2 - x1) * roi_scale * 0.5)
+        half_h = max(1.0, (y2 - y1) * roi_scale * 0.5)
+        rx1 = int(self.clamp(cx - half_w, 0, msg.width - 1))
+        rx2 = int(self.clamp(cx + half_w, 0, msg.width - 1))
+        ry1 = int(self.clamp(cy - half_h, 0, msg.height - 1))
+        ry2 = int(self.clamp(cy + half_h, 0, msg.height - 1))
+
+        grid = max(1, int(self.get_parameter('depth_sample_grid').value))
+        samples: List[float] = []
+        for gy in range(grid):
+            y = int(round(ry1 + (ry2 - ry1) * (gy + 0.5) / grid))
+            for gx in range(grid):
+                x = int(round(rx1 + (rx2 - rx1) * (gx + 0.5) / grid))
+                depth = self.read_depth_pixel_m(msg, x, y, encoding)
+                if depth is not None and self.depth_is_valid(depth):
+                    samples.append(depth)
+
+        min_samples = max(1, int(self.get_parameter('depth_min_valid_samples').value))
+        if len(samples) < min_samples:
+            return None
+        samples.sort()
+        return samples[len(samples) // 2]
+
+    def read_depth_pixel_m(self, msg: Image, x: int, y: int, encoding: str) -> Optional[float]:
+        byteorder = 'big' if bool(msg.is_bigendian) else 'little'
+        try:
+            if encoding in {'16UC1', 'MONO16'}:
+                offset = y * msg.step + x * 2
+                if offset + 2 > len(msg.data):
+                    return None
+                raw = int.from_bytes(bytes(msg.data[offset:offset + 2]), byteorder=byteorder, signed=False)
+                if raw <= 0:
+                    return None
+                return raw * float(self.get_parameter('depth_unit_scale').value)
+            if encoding == '32FC1':
+                offset = y * msg.step + x * 4
+                if offset + 4 > len(msg.data):
+                    return None
+                fmt = '>f' if bool(msg.is_bigendian) else '<f'
+                value = float(struct.unpack(fmt, bytes(msg.data[offset:offset + 4]))[0])
+                if not math.isfinite(value):
+                    return None
+                return value
+        except Exception:
+            return None
+        return None
+
+    def depth_is_valid(self, depth_m: float) -> bool:
+        return (
+            math.isfinite(depth_m)
+            and float(self.get_parameter('depth_min_m').value) <= depth_m <= float(self.get_parameter('depth_max_m').value)
+        )
+
+    @staticmethod
+    def format_optional(value: Optional[float]) -> str:
+        return 'none' if value is None else f'{value:.3f}'
 
     def compute_p_twist(self, center_error: float, area_error: float, center_tol: float) -> Twist:
         twist = Twist()
@@ -662,11 +872,10 @@ class CompetitionPickPlace(Node):
                 if now - det.stamp <= self.stale_seconds
             )
 
-    def publish_search_twist(self) -> None:
+    def publish_search_twist(self, period: Optional[float] = None) -> None:
         twist = Twist()
         twist.angular.z = float(self.get_parameter('search_angular_speed').value)
-        self.cmd_pub.publish(twist)
-        self.last_twist = twist
+        self.publish_control_pulse(twist, self.visual_servo_period_seconds() if period is None else period)
 
     def run_pick_controller(self, target_names: Iterable[str], label: str) -> None:
         if not self.closed_loop_pick:
@@ -695,6 +904,10 @@ class CompetitionPickPlace(Node):
         preclose_area_tol = float(self.get_parameter('pick_preclose_area_tolerance_ratio').value)
         if preclose_area_tol <= 0.0:
             preclose_area_tol = float(self.get_parameter('area_tolerance_ratio').value)
+        preclose_depth = float(self.get_parameter('pick_preclose_target_depth_m').value)
+        if preclose_depth <= 0.0:
+            preclose_depth = float(self.get_parameter('pick_target_depth_m').value)
+        preclose_depth_tol = float(self.get_parameter('pick_depth_tolerance_m').value)
 
         preclose_center = float(self.get_parameter('pick_preclose_center_x_ratio').value)
         for attempt in range(1, retry_attempts + 1):
@@ -706,6 +919,8 @@ class CompetitionPickPlace(Node):
                     timeout=float(self.get_parameter('align_timeout').value),
                     target_area=float(self.get_parameter('pick_target_area_ratio').value),
                     label=f'{attempt_label} retry align',
+                    target_depth=float(self.get_parameter('pick_target_depth_m').value),
+                    depth_tolerance=float(self.get_parameter('pick_depth_tolerance_m').value),
                 )
 
             if bool(self.get_parameter('pick_pregrasp_visual_servo').value):
@@ -718,6 +933,8 @@ class CompetitionPickPlace(Node):
                     target_area=preclose_area,
                     center_tolerance=preclose_center_tol,
                     area_tolerance=preclose_area_tol,
+                    target_depth=preclose_depth,
+                    depth_tolerance=preclose_depth_tol,
                 )
             else:
                 self.run_action_group_steps(pick_action, pregrasp_steps, f'{attempt_label} pregrasp')
@@ -733,6 +950,8 @@ class CompetitionPickPlace(Node):
                         center_tolerance=preclose_center_tol,
                         area_tolerance=preclose_area_tol,
                         stable_frames=int(self.get_parameter('pick_preclose_stable_frames').value),
+                        target_depth=preclose_depth,
+                        depth_tolerance=preclose_depth_tol,
                     )
                 except RuntimeError as exc:
                     self.stop_robot()
@@ -848,6 +1067,8 @@ class CompetitionPickPlace(Node):
         target_area: float,
         center_tolerance: float,
         area_tolerance: Optional[float] = None,
+        target_depth: Optional[float] = None,
+        depth_tolerance: Optional[float] = None,
     ) -> None:
         if not step_indices:
             self.get_logger().warn(f'no action steps configured for {label}')
@@ -874,6 +1095,7 @@ class CompetitionPickPlace(Node):
         self.get_logger().info(
             f'run visual-servo action steps {action_name} {list(step_indices)} for {label}: '
             f'desired_cx={desired_center:.3f}, target_area={target_area:.3f}, '
+            f'target_depth={self.format_optional(self.valid_optional_depth(target_depth))}, '
             f'period={self.visual_servo_period_seconds():.3f}s, '
             f'time_scale={time_scale:.2f}, min_step={min_step:.2f}s, '
             f'settle={settle_seconds:.2f}s, post_step={post_step_seconds:.2f}s'
@@ -890,6 +1112,8 @@ class CompetitionPickPlace(Node):
                     target_area=target_area,
                     center_tolerance=center_tolerance,
                     area_tolerance=area_tolerance,
+                    target_depth=target_depth,
+                    depth_tolerance=depth_tolerance,
                     label=f'{step_label} settle-before',
                 )
             duration = self.pregrasp_tracking_duration(row)
@@ -901,6 +1125,8 @@ class CompetitionPickPlace(Node):
                 target_area=target_area,
                 center_tolerance=center_tolerance,
                 area_tolerance=area_tolerance,
+                target_depth=target_depth,
+                depth_tolerance=depth_tolerance,
                 label=step_label,
             )
             if post_step_seconds > 1e-6 and row_index < len(selected) - 1:
@@ -911,6 +1137,8 @@ class CompetitionPickPlace(Node):
                     target_area=target_area,
                     center_tolerance=center_tolerance,
                     area_tolerance=area_tolerance,
+                    target_depth=target_depth,
+                    depth_tolerance=depth_tolerance,
                     label=f'{step_label} settle-after',
                 )
         self.stop_robot()
@@ -940,10 +1168,13 @@ class CompetitionPickPlace(Node):
         center_tolerance: float,
         label: str,
         area_tolerance: Optional[float] = None,
+        target_depth: Optional[float] = None,
+        depth_tolerance: Optional[float] = None,
     ) -> None:
         deadline = time.monotonic() + duration
         period = self.visual_servo_period_seconds()
         last_log = 0.0
+        last_control_seq = -1
         while rclpy.ok() and not self.shutdown_requested and time.monotonic() < deadline:
             det = self.best_detection(names)
             now = time.monotonic()
@@ -956,29 +1187,42 @@ class CompetitionPickPlace(Node):
                 continue
 
             center_error = det.cx_ratio - desired_center
-            area_error = target_area - det.area_ratio
-            if area_tolerance is not None and abs(center_error) <= center_tolerance and abs(area_error) <= area_tolerance:
+            if self.should_wait_for_fresh_detection(det, last_control_seq):
+                self.stop_robot()
+                time.sleep(period)
+                continue
+            last_control_seq = det.seq
+            area_tol = 0.0 if area_tolerance is None else float(area_tolerance)
+            distance = self.distance_estimate_for_detection(
+                det,
+                target_area=target_area,
+                area_tolerance=area_tol,
+                target_depth=target_depth,
+                depth_tolerance=depth_tolerance,
+            )
+            if area_tolerance is not None and abs(center_error) <= center_tolerance and distance.aligned:
                 self.stop_robot()
                 if now - last_log > 0.45:
                     self.get_logger().info(
                         f'visual-servo {label}: holding alignment class={det.class_name} '
-                        f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f}'
+                        f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f} '
+                        f'distance_source={distance.source} value={self.format_optional(distance.value)}'
                     )
                     last_log = now
                 time.sleep(period)
                 continue
-            twist = self.compute_visual_servo_twist(center_error, area_error, center_tolerance)
-            self.cmd_pub.publish(twist)
-            self.last_twist = twist
+            twist = self.compute_visual_servo_twist(center_error, distance.error, center_tolerance)
             if now - last_log > 0.45:
                 self.get_logger().info(
                     f'visual-servo {label}: class={det.class_name} score={det.score:.2f} '
                     f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f} '
-                    f'desired_cx={desired_center:.3f} target_area={target_area:.3f} '
+                    f'desired_cx={desired_center:.3f} distance_source={distance.source} '
+                    f'value={self.format_optional(distance.value)} target={distance.target:.3f} '
+                    f'error={distance.error:.3f} '
                     f'cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})'
                 )
                 last_log = now
-            time.sleep(period)
+            self.publish_control_pulse(twist, period)
 
     def load_action_group_rows(self, action_name: str) -> List[Tuple[int, int, int, int, int, int, int, int]]:
         path = os.path.join(str(self.get_parameter('action_group_path').value), action_name + '.d6a')
@@ -1046,6 +1290,25 @@ class CompetitionPickPlace(Node):
         except Exception as exc:
             self.get_logger().debug(f'ignored stop publish after shutdown: {exc}')
 
+    def publish_control_pulse(self, twist: Twist, period: float) -> None:
+        if not rclpy.ok():
+            return
+        command_seconds = min(self.visual_servo_command_seconds(), max(0.01, period))
+        try:
+            self.cmd_pub.publish(twist)
+            self.last_twist = twist
+            time.sleep(command_seconds)
+            zero = Twist()
+            for _ in range(2):
+                self.cmd_pub.publish(zero)
+                time.sleep(0.01)
+            self.last_twist = zero
+            remaining = max(0.0, period - command_seconds - 0.02)
+            if remaining > 1e-6:
+                time.sleep(remaining)
+        except Exception as exc:
+            self.get_logger().debug(f'ignored control pulse publish after shutdown: {exc}')
+
     def set_phase(self, phase: Phase, message: str = '') -> None:
         self.phase = phase
         elapsed = time.monotonic() - self.started_at
@@ -1061,7 +1324,20 @@ class CompetitionPickPlace(Node):
         return max(low, min(high, value))
 
     def visual_servo_period_seconds(self) -> float:
-        return self.clamp(float(self.get_parameter('visual_servo_period').value), 0.02, 0.20)
+        configured = self.clamp(float(self.get_parameter('visual_servo_period').value), 0.001, 5.0)
+        if not bool(self.get_parameter('adaptive_servo_timing').value):
+            return configured
+        with self.detection_lock:
+            ema = self.detection_period_ema
+        if ema <= 0.0:
+            return configured
+        min_period = self.clamp(float(self.get_parameter('visual_servo_min_period').value), 0.001, 5.0)
+        max_period = self.clamp(float(self.get_parameter('visual_servo_max_period').value), min_period, 5.0)
+        scale = self.clamp(float(self.get_parameter('visual_servo_period_scale').value), 0.1, 5.0)
+        return self.clamp(ema * scale, min_period, max_period)
+
+    def visual_servo_command_seconds(self) -> float:
+        return self.clamp(float(self.get_parameter('visual_servo_command_seconds').value), 0.001, 5.0)
 
 
 def main(args=None) -> None:

@@ -11,6 +11,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.request import urlopen
 
 try:
     import paramiko
@@ -40,6 +41,7 @@ import rclpy
 from cv_bridge import CvBridge
 from interfaces.msg import ObjectsInfo
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
 CAMERA_TOPIC = "__CAMERA_TOPIC__"
@@ -62,7 +64,7 @@ class YoloOverlayStream(Node):
         self.latest_time = 0.0
         self.last_frame_time = 0.0
         self.create_subscription(ObjectsInfo, DETECTION_TOPIC, self.detect_cb, 10)
-        self.create_subscription(Image, CAMERA_TOPIC, self.image_cb, 1)
+        self.create_subscription(Image, CAMERA_TOPIC, self.image_cb, qos_profile_sensor_data)
 
     def detect_cb(self, msg):
         detections = []
@@ -212,6 +214,7 @@ INDEX_HTML = r'''<!doctype html>
     button.ok { background: var(--ok); color: #fff; border-color: var(--ok); }
     button:disabled { opacity: .55; cursor: wait; }
     .frame {
+      position: relative;
       min-height: 360px;
       background: #111827;
       display: grid;
@@ -224,6 +227,21 @@ INDEX_HTML = r'''<!doctype html>
       object-fit: contain;
       display: block;
     }
+    .frame-message {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      color: #d5e1f3;
+      background: rgba(17, 24, 39, .92);
+      font-size: 16px;
+      text-align: center;
+      line-height: 1.6;
+      pointer-events: none;
+    }
+    .frame-message.hidden { display: none; }
+    .frame-message.error { color: #ffd7d7; }
     .side { display: grid; grid-template-rows: auto auto 1fr; overflow: hidden; }
     .params {
       display: grid;
@@ -265,6 +283,7 @@ INDEX_HTML = r'''<!doctype html>
       <div class="toolbar">
         <div class="button-row">
           <button id="check">检测连接</button>
+          <button id="reset">重置通信</button>
           <button id="visionStart" class="primary">启动视觉</button>
           <button id="visionStop">停止视觉</button>
         </div>
@@ -275,6 +294,7 @@ INDEX_HTML = r'''<!doctype html>
       </div>
       <div class="frame">
         <img id="stream" alt="YOLO 实时画面">
+        <div class="frame-message" id="streamMessage">连接机器人 WiFi 后点击“打开画面”。热点 HW-9E5ACFD8，密码 hiwonder。</div>
       </div>
     </section>
     <section class="side">
@@ -295,55 +315,91 @@ INDEX_HTML = r'''<!doctype html>
           </select>
         </label>
         <label>YOLO 置信度
-          <input id="yolo_conf" type="number" step="0.01" min="0.1" max="0.99" value="0.70">
+          <input id="yolo_conf" type="number" step="0.01" value="0.70">
         </label>
         <label>中心目标 cx
-          <input id="center" type="number" step="0.001" min="0" max="1" value="0.50">
+          <input id="center" type="number" step="0.001" value="0.50">
         </label>
         <label>中心容差
-          <input id="center_tolerance" type="number" step="0.001" min="0" max="0.5" value="0.028">
+          <input id="center_tolerance" type="number" step="0.001" value="0.028">
         </label>
         <label>面积目标
-          <input id="target_area" type="number" step="0.001" min="0" max="0.5" value="0.043">
+          <input id="target_area" type="number" step="0.001" value="0.043">
         </label>
         <label>面积容差
-          <input id="area_tolerance" type="number" step="0.001" min="0" max="0.2" value="0.010">
+          <input id="area_tolerance" type="number" step="0.001" value="0.010">
+        </label>
+        <label>深度距离
+          <select id="use_depth">
+            <option value="true">on</option>
+            <option value="false">off</option>
+          </select>
+        </label>
+        <label>目标深度(m)
+          <input id="target_depth" type="number" step="0.001" value="0.32">
+        </label>
+        <label>深度容差(m)
+          <input id="depth_tolerance" type="number" step="0.001" value="0.025">
+        </label>
+        <label>深度ROI
+          <input id="depth_roi" type="number" step="0.05" value="0.45">
+        </label>
+        <label class="wide">depth topic
+          <input id="depth_topic" type="text" value="/ascamera/camera_publisher/depth0/image_raw">
         </label>
         <label>pick attempts
-          <input id="pick_attempts" type="number" step="1" min="1" max="20" value="3">
+          <input id="pick_attempts" type="number" step="1" value="3">
         </label>
         <label>gripper gap
-          <input id="gripper_gap" type="number" step="1" min="0" max="200" value="30">
+          <input id="gripper_gap" type="number" step="1" value="30">
         </label>
         <label>empty close
-          <input id="empty_close" type="number" step="1" min="0" max="1000" value="500">
+          <input id="empty_close" type="number" step="1" value="500">
         </label>
         <label>gripper delay(s)
-          <input id="gripper_delay" type="number" step="0.05" min="0" max="5" value="0.35">
+          <input id="gripper_delay" type="number" step="0.05" value="0.35">
         </label>
         <label>最大线速度
-          <input id="max_linear" type="number" step="0.005" min="0" max="0.2" value="0.035">
+          <input id="max_linear" type="number" step="0.005" value="0.035">
         </label>
         <label>最大角速度
-          <input id="max_angular" type="number" step="0.01" min="0" max="0.6" value="0.14">
+          <input id="max_angular" type="number" step="0.01" value="0.14">
         </label>
         <label>visual period(s)
-          <input id="visual_period" type="number" step="0.01" min="0.02" max="0.2" value="0.10">
+          <input id="visual_period" type="number" step="0.01" value="0.10">
+        </label>
+        <label>cmd pulse(s)
+          <input id="cmd_pulse" type="number" step="0.01" value="0.04">
+        </label>
+        <label>adaptive timing
+          <select id="adaptive_timing">
+            <option value="true">on</option>
+            <option value="false">off</option>
+          </select>
+        </label>
+        <label>min period(s)
+          <input id="min_period" type="number" step="0.005" value="0.035">
+        </label>
+        <label>max period(s)
+          <input id="max_period" type="number" step="0.005" value="0.16">
+        </label>
+        <label>period scale
+          <input id="period_scale" type="number" step="0.05" value="1.05">
         </label>
         <label>pregrasp scale
-          <input id="pregrasp_scale" type="number" step="0.1" min="0.1" max="5" value="2.4">
+          <input id="pregrasp_scale" type="number" step="0.1" value="2.4">
         </label>
         <label>settle before(s)
-          <input id="pregrasp_settle" type="number" step="0.1" min="0" max="5" value="0.7">
+          <input id="pregrasp_settle" type="number" step="0.1" value="0.7">
         </label>
         <label>settle after(s)
-          <input id="pregrasp_post" type="number" step="0.1" min="0" max="5" value="0.6">
+          <input id="pregrasp_post" type="number" step="0.1" value="0.6">
         </label>
         <label>低位目标 cx
-          <input id="preclose_center" type="number" step="0.001" min="0" max="1" value="0.90">
+          <input id="preclose_center" type="number" step="0.001" value="0.90">
         </label>
         <label>下探跟踪面积
-          <input id="preclose_area" type="number" step="0.001" min="0" max="0.5" value="0.095">
+          <input id="preclose_area" type="number" step="0.001" value="0.095">
         </label>
         <label class="wide">闭环模式
           <select id="control_mode">
@@ -358,6 +414,7 @@ INDEX_HTML = r'''<!doctype html>
 <script>
 const $ = id => document.getElementById(id);
 let streamOn = false;
+let statusInFlight = false;
 
 function noticeBox() {
   let box = $('notice');
@@ -392,6 +449,11 @@ function params() {
     center_tolerance: Number($('center_tolerance').value),
     target_area: Number($('target_area').value),
     area_tolerance: Number($('area_tolerance').value),
+    use_depth: $('use_depth').value === 'true',
+    depth_topic: $('depth_topic').value,
+    target_depth: Number($('target_depth').value),
+    depth_tolerance: Number($('depth_tolerance').value),
+    depth_roi: Number($('depth_roi').value),
     pick_attempts: Number($('pick_attempts').value),
     gripper_gap: Number($('gripper_gap').value),
     empty_close: Number($('empty_close').value),
@@ -399,6 +461,11 @@ function params() {
     max_linear: Number($('max_linear').value),
     max_angular: Number($('max_angular').value),
     visual_period: Number($('visual_period').value),
+    cmd_pulse: Number($('cmd_pulse').value),
+    adaptive_timing: $('adaptive_timing').value === 'true',
+    min_period: Number($('min_period').value),
+    max_period: Number($('max_period').value),
+    period_scale: Number($('period_scale').value),
     pregrasp_scale: Number($('pregrasp_scale').value),
     pregrasp_settle: Number($('pregrasp_settle').value),
     pregrasp_post: Number($('pregrasp_post').value),
@@ -409,15 +476,28 @@ function params() {
 }
 
 async function api(path, body) {
+  const controller = new AbortController();
+  const timeoutMs = path.startsWith('/api/status') ? 30000 : 65000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const options = body ? {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body)
-  } : {};
-  const res = await fetch(path, options);
-  const data = await res.json();
-  if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
-  return data;
+    body: JSON.stringify(body),
+    signal: controller.signal
+  } : {signal: controller.signal};
+  try {
+    const res = await fetch(path, options);
+    const data = await res.json().catch(() => ({ok: false, error: res.statusText || 'non-json response'}));
+    if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
+    return data;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(path.startsWith('/api/status') ? '状态查询超时' : '命令执行超时');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function setBusy(button, busy) {
@@ -429,29 +509,55 @@ function appendLog(text) {
   $('log').scrollTop = $('log').scrollHeight;
 }
 
-async function refreshStatus() {
+function setStreamMessage(text, kind = 'info') {
+  const box = $('streamMessage');
+  if (!box) return;
+  box.textContent = text || '';
+  box.classList.toggle('hidden', !text);
+  box.classList.toggle('error', kind === 'error');
+}
+
+async function refreshStatus(options = {}) {
+  if (statusInFlight) {
+    if (options.force) showNotice('状态仍在查询中，请稍等几秒。', 'info');
+    return;
+  }
+  statusInFlight = true;
   try {
-    const data = await api('/api/status');
-    $('robot').textContent = '机器人: ' + (data.robot ? '在线' : '离线');
+    const data = await api(options.force ? '/api/status?force=1' : '/api/status');
+    $('robot').textContent = '机器人: ' + (data.status_refreshing ? '查询中' : (data.robot ? '在线' : '离线'));
     $('vision').textContent = '视觉: ' + (data.yolo ? '运行中' : '未启动');
     $('pick').textContent = '抓取: ' + (data.pick ? '运行中' : '空闲');
-    const processText = data.process_summary ? ('\n== PROCESSES ==\n' + data.process_summary) : '';
+    const processText = data.process_summary ? ('\n' + data.process_summary) : '';
     if (data.log || processText) appendLog((data.log || '') + processText);
+    return data;
   } catch (err) {
-    $('robot').textContent = '机器人: 离线';
-    appendLog(String(err.message || err));
-    showNotice('连接机器人失败：' + String(err.message || err), 'error');
+    const message = String(err.message || err);
+    if (message.includes('状态查询超时') || message.toLowerCase().includes('abort')) {
+      appendLog('状态查询超时。抓取/视觉进程可能仍在运行；稍后点“检测连接”查看日志。');
+      if (!options.quiet) {
+        showNotice('状态查询超时，不代表抓取已经停止。', 'info');
+      }
+    } else {
+      $('robot').textContent = '机器人: 离线';
+      appendLog(message);
+      if (!options.quiet) {
+        showNotice('连接机器人失败：' + message, 'error');
+      }
+    }
+  } finally {
+    statusInFlight = false;
   }
 }
 
-$('check').onclick = refreshStatus;
+$('check').onclick = () => refreshStatus({force: true});
 $('visionStart').onclick = async () => {
   setBusy($('visionStart'), true);
   showNotice('正在启动视觉并清理旧进程...', 'info');
   try {
     const data = await api('/api/start_vision', params());
     showNotice('视觉启动命令已执行：' + (data.message || ''), 'ok');
-    await refreshStatus();
+    refreshStatus({quiet: true});
   }
   catch (err) { showNotice('启动视觉失败：' + String(err.message || err), 'error'); appendLog(String(err.message || err)); }
   finally { setBusy($('visionStart'), false); }
@@ -462,32 +568,115 @@ $('visionStop').onclick = async () => {
   try {
     const data = await api('/api/stop_vision');
     showNotice('视觉已停止：' + (data.message || ''), 'ok');
-    await refreshStatus();
+    refreshStatus({quiet: true});
   }
   catch (err) { showNotice('停止视觉失败：' + String(err.message || err), 'error'); appendLog(String(err.message || err)); }
   finally { setBusy($('visionStop'), false); }
 };
 $('streamStart').onclick = () => {
-  if (streamOn) {
-    showNotice('画面已经打开；不会重复创建视频流。', 'info');
-    return;
-  }
-  streamOn = true;
-  showNotice('正在打开实时画面...', 'info');
-  $('stream').src = '/stream.mjpg?ts=' + Date.now();
+  startStream();
 };
-$('streamStop').onclick = () => {
+$('streamStop').onclick = async () => {
   streamOn = false;
   $('stream').removeAttribute('src');
-  showNotice('实时画面已关闭。', 'ok');
+  setStreamMessage('实时画面已关闭。再次打开前请确认已连接 HW-9E5ACFD8。', 'info');
+  try {
+    const data = await api('/api/stop_stream', {});
+    showNotice('实时画面已关闭：' + (data.message || ''), 'ok');
+  } catch (err) {
+    showNotice('本地画面已关闭；后台流关闭返回异常：' + String(err.message || err), 'info');
+  }
+  refreshStatus({quiet: true});
+};
+
+async function startStream() {
+  if (streamOn) {
+    streamOn = false;
+    $('stream').removeAttribute('src');
+    await api('/api/stop_stream', {}).catch(() => null);
+    showNotice('正在替换旧视频流...', 'info');
+  }
+  setBusy($('streamStart'), true);
+  setStreamMessage('正在检测机器人连接...', 'info');
+  showNotice('正在检测机器人连接并打开实时画面...', 'info');
+  try {
+    const status = await api('/api/status?force=1');
+    $('robot').textContent = '机器人: ' + (status.robot ? '在线' : '离线');
+    $('vision').textContent = '视觉: ' + (status.yolo ? '运行中' : '未启动');
+    $('pick').textContent = '抓取: ' + (status.pick ? '运行中' : '空闲');
+    if (!status.robot) {
+      const msg = '机器人未连接。请先把电脑 WiFi 切到 HW-9E5ACFD8，密码 hiwonder，然后再点“打开画面”。';
+      setStreamMessage(msg, 'error');
+      showNotice(msg, 'error');
+      appendLog((status.log || msg) + '\n' + (status.process_summary || ''));
+      return;
+    }
+    streamOn = true;
+    if (!status.pick && !status.yolo) {
+      setStreamMessage('机器人已连接，正在启动视觉节点...', 'info');
+      const vision = await api('/api/start_vision', params());
+      showNotice('视觉已准备：' + (vision.message || ''), 'ok');
+    }
+    setStreamMessage('正在连接机器人摄像头和 YOLO 画面...', 'info');
+    $('stream').src = '/stream.mjpg?ts=' + Date.now();
+  } catch (err) {
+    streamOn = false;
+    $('stream').removeAttribute('src');
+    const msg = '打开画面失败：' + String(err.message || err);
+    setStreamMessage(msg, 'error');
+    showNotice(msg, 'error');
+    appendLog(String(err.message || err));
+  } finally {
+    setBusy($('streamStart'), false);
+  }
+}
+
+$('stream').onload = () => {
+  if (streamOn) {
+    setStreamMessage('', 'info');
+    showNotice('实时画面已打开。', 'ok');
+  }
+};
+$('stream').onerror = () => {
+  if (!streamOn) return;
+  streamOn = false;
+  $('stream').removeAttribute('src');
+  const msg = '画面流打开失败。请确认已连接 HW-9E5ACFD8，并点击“检测连接”查看 camera/yolo 日志。';
+  setStreamMessage(msg, 'error');
+  showNotice(msg, 'error');
+  refreshStatus({quiet: true, force: true});
+};
+$('reset').onclick = async () => {
+  setBusy($('reset'), true);
+  streamOn = false;
+  $('stream').removeAttribute('src');
+  setStreamMessage('正在重置本地视频流和机器人端 YOLO/抓取进程...', 'info');
+  showNotice('正在重置通信和机器人端残留进程...', 'info');
+  try {
+    await api('/api/stop_stream', {}).catch(() => null);
+    const data = await api('/api/reset', {});
+    showNotice('重置完成：' + (data.message || ''), 'ok');
+    setStreamMessage('重置完成。需要画面时再点“打开画面”。', 'info');
+    refreshStatus({quiet: true, force: true});
+  } catch (err) {
+    const msg = '重置失败：' + String(err.message || err);
+    showNotice(msg, 'error');
+    setStreamMessage(msg, 'error');
+    appendLog(String(err.message || err));
+  } finally {
+    setBusy($('reset'), false);
+  }
 };
 $('pickStart').onclick = async () => {
   setBusy($('pickStart'), true);
   showNotice('正在启动抓取：会先清理旧视觉/抓取进程...', 'info');
+  streamOn = false;
+  $('stream').removeAttribute('src');
+  setStreamMessage('抓取已接管相机/YOLO，实时画面暂时关闭。', 'info');
   try {
     const data = await api('/api/start_pick', params());
     showNotice('抓取已启动：' + (data.message || ''), 'ok');
-    await refreshStatus();
+    refreshStatus({quiet: true});
   }
   catch (err) { showNotice('启动抓取失败：' + String(err.message || err), 'error'); appendLog(String(err.message || err)); }
   finally { setBusy($('pickStart'), false); }
@@ -498,7 +687,7 @@ $('pickStop').onclick = async () => {
   try {
     const data = await api('/api/stop_pick');
     showNotice('抓取已结束：' + (data.message || ''), 'ok');
-    await refreshStatus();
+    refreshStatus({quiet: true});
   }
   catch (err) { showNotice('结束抓取失败：' + String(err.message || err), 'error'); appendLog(String(err.message || err)); }
   finally { setBusy($('pickStop'), false); }
@@ -509,13 +698,13 @@ $('drop').onclick = async () => {
   try {
     const data = await api('/api/drop', params());
     showNotice('放下动作已执行：' + (data.message || ''), 'ok');
-    await refreshStatus();
+    refreshStatus({quiet: true});
   }
   catch (err) { showNotice('放下失败：' + String(err.message || err), 'error'); appendLog(String(err.message || err)); }
   finally { setBusy($('drop'), false); }
 };
 
-setInterval(refreshStatus, 2500);
+setInterval(refreshStatus, 5000);
 refreshStatus();
 </script>
 </body>
@@ -544,6 +733,14 @@ def current_ssid() -> str:
     return ''
 
 
+def tcp_reachable(host: str, port: int = 22, timeout: float = 0.8) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 class Robot:
     def __init__(self, host: str, user: str, password: str, container: str):
         self.host = host
@@ -565,10 +762,30 @@ class Robot:
         client = self.ssh()
         try:
             stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-            out = stdout.read().decode('utf-8', errors='replace')
-            err = stderr.read().decode('utf-8', errors='replace')
-            rc = stdout.channel.recv_exit_status()
-            return rc, out, err
+            channel = stdout.channel
+            deadline = time.time() + max(1, timeout)
+            out_chunks = []
+            err_chunks = []
+            while True:
+                while channel.recv_ready():
+                    out_chunks.append(channel.recv(65536))
+                while channel.recv_stderr_ready():
+                    err_chunks.append(channel.recv_stderr(65536))
+                if channel.exit_status_ready():
+                    while channel.recv_ready():
+                        out_chunks.append(channel.recv(65536))
+                    while channel.recv_stderr_ready():
+                        err_chunks.append(channel.recv_stderr(65536))
+                    rc = channel.recv_exit_status()
+                    out = b''.join(out_chunks).decode('utf-8', errors='replace')
+                    err = b''.join(err_chunks).decode('utf-8', errors='replace')
+                    return rc, out, err
+                if time.time() >= deadline:
+                    channel.close()
+                    out = b''.join(out_chunks).decode('utf-8', errors='replace')
+                    err = b''.join(err_chunks).decode('utf-8', errors='replace')
+                    return 124, out, (err + f'\ncommand timed out after {timeout}s').strip()
+                time.sleep(0.05)
         finally:
             client.close()
 
@@ -576,7 +793,7 @@ class Robot:
         command = f'docker exec -u ubuntu {shlex.quote(self.container)} bash -lc {shlex.quote(script)}'
         client = self.ssh()
         stdin, stdout, stderr = client.exec_command(command, timeout=None)
-        return client, stdout, stderr
+        return client, stdout.channel
 
 
 def ros_prefix() -> str:
@@ -585,24 +802,79 @@ def ros_prefix() -> str:
 
 def shell_kill_helpers() -> str:
     return r'''
+matching_pids() {
+  PATTERN="$1"
+  ps -eo pid=,comm=,args= 2>/dev/null | while read -r PID COMM ARGS; do
+    [ -z "$PID" ] && continue
+    [ "$PID" = "$$" ] && continue
+    [ "$PID" = "$PPID" ] && continue
+    case "$COMM" in
+      bash|sh|dash|timeout|pgrep|grep|ps) continue ;;
+    esac
+    printf '%s\n' "$ARGS" | grep -F -- "$PATTERN" >/dev/null 2>&1 && printf '%s\n' "$PID"
+  done
+}
 kill_matching() {
   PATTERN="$1"
-  for PID in $(pgrep -f "$PATTERN" 2>/dev/null || true); do
-    if [ "$PID" != "$$" ] && [ "$PID" != "$PPID" ]; then
-      kill "$PID" 2>/dev/null || true
-    fi
+  SIGNAL="${2:-TERM}"
+  for PID in $(matching_pids "$PATTERN"); do
+    kill "-$SIGNAL" "$PID" 2>/dev/null || true
   done
+}
+force_kill_matching() {
+  PATTERN="$1"
+  kill_matching "$PATTERN" TERM
+  sleep 0.2
+  kill_matching "$PATTERN" KILL
 }
 count_matching() {
   PATTERN="$1"
   COUNT=0
-  for PID in $(pgrep -f "$PATTERN" 2>/dev/null || true); do
-    if [ "$PID" != "$$" ] && [ "$PID" != "$PPID" ]; then
-      COUNT=$((COUNT + 1))
-    fi
+  for PID in $(matching_pids "$PATTERN"); do
+    COUNT=$((COUNT + 1))
   done
   echo "$COUNT"
 }
+reset_ui_processes() {
+  timeout 2s ros2 service call /competition_pick_place/stop std_srvs/srv/Trigger "{}" >/dev/null 2>&1 || true
+  force_kill_matching "competition_node"
+  force_kill_matching "ros2 launch competition_pick_place"
+  force_kill_matching "yolov11_node"
+  force_kill_matching "python3 -u /tmp/ui_yolo_runner.py"
+  force_kill_matching "local_yolo_overlay_stream"
+  rm -f /tmp/ui_pick.log /tmp/ui_yolo.log
+}
+'''
+
+
+def camera_helpers() -> str:
+    return f'''
+CAMERA_TOPIC="{CAMERA_TOPIC}"
+camera_frame_ready() {{
+  timeout 4s ros2 topic echo --once "$CAMERA_TOPIC" >/dev/null 2>&1
+}}
+ensure_camera() {{
+  if camera_frame_ready; then
+    echo "camera_ready=1"
+    return 0
+  fi
+  force_kill_matching "depth_camera.launch.py"
+  force_kill_matching "camera_publisher"
+  force_kill_matching "ascamera"
+  nohup ros2 launch peripherals depth_camera.launch.py >/tmp/ui_camera.log 2>&1 &
+  echo "camera_pid=$!"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    if camera_frame_ready; then
+      echo "camera_ready=1"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "camera_ready=0"
+  echo "__CAMERA_LOG__"
+  tail -n 80 /tmp/ui_camera.log 2>/dev/null || true
+  return 1
+}}
 '''
 
 
@@ -611,21 +883,29 @@ def require_ok(rc: int, out: str, err: str) -> None:
         raise RuntimeError((err or out or f'command failed rc={rc}').strip())
 
 
+def reset_robot(robot: Robot) -> str:
+    script = ros_prefix() + shell_kill_helpers() + '''
+set +e
+reset_ui_processes
+sleep 0.5
+echo "robot ui reset done"
+echo "pick_launch_processes=$(count_matching 'ros2 launch competition_pick_place')"
+echo "competition_processes=$(count_matching 'competition_node')"
+echo "yolo_processes=$(count_matching 'yolov11_node')"
+echo "vision_runner_processes=$(count_matching 'python3 -u /tmp/ui_yolo_runner.py')"
+echo "stream_processes=$(count_matching 'local_yolo_overlay_stream')"
+'''
+    rc, out, err = robot.docker_exec(script, timeout=10)
+    require_ok(rc, out, err)
+    return out.strip()
+
+
 def start_vision(robot: Robot, params: dict) -> str:
     yolo_conf = float(params.get('yolo_conf', 0.70))
-    script = ros_prefix() + shell_kill_helpers() + f'''
+    script = ros_prefix() + shell_kill_helpers() + camera_helpers() + f'''
 set +e
-if ! ros2 topic list 2>/dev/null | grep -F "{CAMERA_TOPIC}" >/dev/null; then
-  nohup ros2 launch peripherals depth_camera.launch.py >/tmp/ui_camera.log 2>&1 &
-  sleep 3
-fi
-timeout 2s ros2 service call /competition_pick_place/stop std_srvs/srv/Trigger "{{}}" >/dev/null 2>&1 || true
-kill_matching "competition_node"
-for PID in $(pgrep -f "ros2 launch competition_pick_place" 2>/dev/null || true); do
-  if [ "$PID" != "$$" ] && [ "$PID" != "$PPID" ]; then kill "$PID" 2>/dev/null || true; fi
-done
-kill_matching "yolov11_node"
-kill_matching "python3 -u /tmp/ui_yolo_runner.py"
+reset_ui_processes
+ensure_camera || exit 20
 cat >/tmp/ui_yolo_runner.py <<'PY'
 import sys
 
@@ -652,12 +932,16 @@ sys.exit(launch_service.run())
 PY
 nohup python3 -u /tmp/ui_yolo_runner.py > {REMOTE_YOLO_LOG} 2>&1 &
 echo "vision_pid=$!"
-sleep 1
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  ros2 topic list 2>/dev/null | grep -F "{DETECTION_TOPIC}" >/dev/null && break
+  sleep 1
+done
 echo "vision_runner_processes=$(count_matching 'python3 -u /tmp/ui_yolo_runner.py')"
 echo "yolo_processes=$(count_matching 'yolov11_node')"
 echo "pick_processes=$(count_matching 'competition_node')"
+echo "detection_topic_present=$(ros2 topic list 2>/dev/null | grep -F "{DETECTION_TOPIC}" >/dev/null && echo 1 || echo 0)"
 '''
-    rc, out, err = robot.docker_exec(script, timeout=20)
+    rc, out, err = robot.docker_exec(script, timeout=45)
     require_ok(rc, out, err)
     return out.strip()
 
@@ -665,12 +949,14 @@ echo "pick_processes=$(count_matching 'competition_node')"
 def stop_vision(robot: Robot) -> str:
     script = ros_prefix() + shell_kill_helpers() + f'''
 set +e
-kill_matching "yolov11_node"
-kill_matching "python3 -u /tmp/ui_yolo_runner.py"
+force_kill_matching "yolov11_node"
+force_kill_matching "python3 -u /tmp/ui_yolo_runner.py"
+force_kill_matching "local_yolo_overlay_stream"
 sleep 1
 echo "vision stopped"
 echo "vision_runner_processes=$(count_matching 'python3 -u /tmp/ui_yolo_runner.py')"
 echo "yolo_processes=$(count_matching 'yolov11_node')"
+echo "stream_processes=$(count_matching 'local_yolo_overlay_stream')"
 '''
     rc, out, err = robot.docker_exec(script, timeout=12)
     require_ok(rc, out, err)
@@ -684,6 +970,11 @@ def start_pick(robot: Robot, params: dict) -> str:
     center_tol = float(params.get('center_tolerance', 0.028))
     target_area = float(params.get('target_area', 0.043))
     area_tol = float(params.get('area_tolerance', 0.010))
+    use_depth = str(bool(params.get('use_depth', True))).lower()
+    depth_topic = shlex.quote(str(params.get('depth_topic', '/ascamera/camera_publisher/depth0/image_raw')).strip())
+    target_depth = float(params.get('target_depth', 0.32))
+    depth_tolerance = float(params.get('depth_tolerance', 0.025))
+    depth_roi = float(params.get('depth_roi', 0.45))
     pick_attempts = max(1, int(params.get('pick_attempts', 3)))
     gripper_gap = max(0, int(params.get('gripper_gap', 30)))
     empty_close = int(params.get('empty_close', 500))
@@ -691,20 +982,20 @@ def start_pick(robot: Robot, params: dict) -> str:
     max_linear = float(params.get('max_linear', 0.035))
     max_angular = float(params.get('max_angular', 0.14))
     visual_period = float(params.get('visual_period', 0.10))
+    cmd_pulse = float(params.get('cmd_pulse', 0.04))
+    adaptive_timing = str(bool(params.get('adaptive_timing', True))).lower()
+    min_period = float(params.get('min_period', 0.035))
+    max_period = float(params.get('max_period', 0.16))
+    period_scale = float(params.get('period_scale', 1.05))
     pregrasp_scale = float(params.get('pregrasp_scale', 2.4))
     pregrasp_settle = float(params.get('pregrasp_settle', 0.7))
     pregrasp_post = float(params.get('pregrasp_post', 0.6))
     preclose_center = float(params.get('preclose_center', 0.90))
     preclose_area = float(params.get('preclose_area', 0.095))
-    script = ros_prefix() + shell_kill_helpers() + f'''
+    script = ros_prefix() + shell_kill_helpers() + camera_helpers() + f'''
 set +e
-timeout 2s ros2 service call /competition_pick_place/stop std_srvs/srv/Trigger "{{}}" >/dev/null 2>&1 || true
-kill_matching "competition_node"
-kill_matching "yolov11_node"
-kill_matching "python3 -u /tmp/ui_yolo_runner.py"
-for PID in $(pgrep -f "ros2 launch competition_pick_place" 2>/dev/null || true); do
-  if [ "$PID" != "$$" ] && [ "$PID" != "$PPID" ]; then kill "$PID" 2>/dev/null || true; fi
-done
+reset_ui_processes
+ensure_camera || exit 20
 rm -f {REMOTE_PICK_LOG}
 nohup ros2 launch competition_pick_place competition_run.launch.py \\
   target_class:={target} \\
@@ -726,6 +1017,18 @@ nohup ros2 launch competition_pick_place competition_run.launch.py \\
   wait_for_detection_stream:=true \\
   detection_stream_timeout:=20.0 \\
   detection_ready_min_messages:=1 \\
+  use_depth_distance:={use_depth} \\
+  depth_topic:={depth_topic} \\
+  depth_stale_seconds:=0.800 \\
+  depth_unit_scale:=0.001 \\
+  depth_roi_scale:={depth_roi:.3f} \\
+  depth_sample_grid:=5 \\
+  depth_min_valid_samples:=3 \\
+  depth_min_m:=0.080 \\
+  depth_max_m:=1.500 \\
+  pick_target_depth_m:={target_depth:.3f} \\
+  pick_depth_tolerance_m:={depth_tolerance:.3f} \\
+  pick_preclose_target_depth_m:=-1.0 \\
   desired_center_x_ratio:={center:.4f} \\
   center_tolerance_ratio:={center_tol:.4f} \\
   pick_target_area_ratio:={target_area:.4f} \\
@@ -735,6 +1038,12 @@ nohup ros2 launch competition_pick_place competition_run.launch.py \\
   closed_loop_pick:=true \\
   pick_visual_servo_timeout:=5.0 \\
   visual_servo_period:={visual_period:.3f} \\
+  visual_servo_command_seconds:={cmd_pulse:.3f} \\
+  adaptive_servo_timing:={adaptive_timing} \\
+  visual_servo_min_period:={min_period:.3f} \\
+  visual_servo_max_period:={max_period:.3f} \\
+  visual_servo_period_scale:={period_scale:.3f} \\
+  require_fresh_detection_for_control:=true \\
   pick_pregrasp_visual_servo:=true \\
   pick_pregrasp_time_scale:={pregrasp_scale:.3f} \\
   pick_pregrasp_min_step_seconds:=0.800 \\
@@ -770,13 +1079,18 @@ nohup ros2 launch competition_pick_place competition_run.launch.py \\
   mpc_terminal_weight:=2.2 \\
   mpc_center_gate_ratio:=0.10 > {REMOTE_PICK_LOG} 2>&1 &
 echo "pick_pid=$!"
-sleep 1
+for i in 1 2 3 4 5 6; do
+  PCOUNT=$(count_matching 'competition_node')
+  [ "$PCOUNT" -gt 0 ] && break
+  sleep 1
+done
 echo "pick_launch_processes=$(count_matching 'ros2 launch competition_pick_place')"
 echo "competition_processes=$(count_matching 'competition_node')"
 echo "yolo_processes=$(count_matching 'yolov11_node')"
 echo "vision_runner_processes=$(count_matching 'python3 -u /tmp/ui_yolo_runner.py')"
+echo "stream_processes=$(count_matching 'local_yolo_overlay_stream')"
 '''
-    rc, out, err = robot.docker_exec(script, timeout=18)
+    rc, out, err = robot.docker_exec(script, timeout=45)
     require_ok(rc, out, err)
     return out.strip()
 
@@ -784,18 +1098,14 @@ echo "vision_runner_processes=$(count_matching 'python3 -u /tmp/ui_yolo_runner.p
 def stop_pick(robot: Robot) -> str:
     script = ros_prefix() + shell_kill_helpers() + '''
 set +e
-timeout 2s ros2 service call /competition_pick_place/stop std_srvs/srv/Trigger "{}" >/dev/null 2>&1 || true
-kill_matching "competition_node"
-kill_matching "yolov11_node"
-kill_matching "python3 -u /tmp/ui_yolo_runner.py"
-for PID in $(pgrep -f "ros2 launch competition_pick_place" 2>/dev/null || true); do
-  if [ "$PID" != "$$" ] && [ "$PID" != "$PPID" ]; then kill "$PID" 2>/dev/null || true; fi
-done
+reset_ui_processes
 sleep 1
 echo "pick stopped"
 echo "pick_launch_processes=$(count_matching 'ros2 launch competition_pick_place')"
 echo "competition_processes=$(count_matching 'competition_node')"
 echo "yolo_processes=$(count_matching 'yolov11_node')"
+echo "vision_runner_processes=$(count_matching 'python3 -u /tmp/ui_yolo_runner.py')"
+echo "stream_processes=$(count_matching 'local_yolo_overlay_stream')"
 '''
     rc, out, err = robot.docker_exec(script, timeout=12)
     require_ok(rc, out, err)
@@ -833,16 +1143,24 @@ echo "drop done"
 
 
 def get_status(robot: Robot) -> dict:
+    if not tcp_reachable(robot.host, 22, timeout=0.8):
+        return {
+            'robot': False,
+            'yolo': False,
+            'pick': False,
+            'log': 'Robot SSH is not reachable. Connect WiFi to HW-9E5ACFD8 before using robot controls.',
+            'process_summary': 'robot offline',
+            'process_count': 0,
+            'ssid': current_ssid(),
+        }
     script = ros_prefix() + shell_kill_helpers() + f'''
 set +e
 echo "__TOPICS__"
 ros2 topic list 2>/dev/null | grep -E "ascamera|object_detect|yolo|controller/cmd_vel" || true
 echo "__PROCS__"
-for PATTERN in "yolov11_node" "python3 -u /tmp/ui_yolo_runner.py" "competition_node" "ros2 launch competition_pick_place"; do
-  for PID in $(pgrep -f "$PATTERN" 2>/dev/null || true); do
-    if [ "$PID" != "$$" ] && [ "$PID" != "$PPID" ]; then
-      ps -p "$PID" -o pid=,args= 2>/dev/null || true
-    fi
+for PATTERN in "yolov11_node" "python3 -u /tmp/ui_yolo_runner.py" "competition_node" "ros2 launch competition_pick_place" "local_yolo_overlay_stream"; do
+  for PID in $(matching_pids "$PATTERN"); do
+    ps -p "$PID" -o pid=,args= 2>/dev/null || true
   done
 done
 echo "__YOLO_LOG__"
@@ -865,15 +1183,24 @@ tail -n 80 {REMOTE_PICK_LOG} 2>/dev/null || true
         yolo_log = out.split('__YOLO_LOG__', 1)[1].split('__PICK_LOG__', 1)[0].strip()
     if '__PICK_LOG__' in out:
         log = out.split('__PICK_LOG__', 1)[-1].strip()
-    yolo = 'yolov11_node' in procs or DETECTION_TOPIC in topics
+    yolo = 'yolov11_node' in procs
     pick = 'competition_node' in procs
     combined_log = ''
     if yolo_log:
         combined_log += '== YOLO ==\n' + yolo_log[-2200:] + '\n'
     if log:
         combined_log += '== PICK ==\n' + log[-3000:]
+    topic_lines = [line.strip() for line in topics.splitlines() if line.strip()]
     process_lines = [line.strip() for line in procs.splitlines() if line.strip()]
-    process_summary = '\n'.join(process_lines) if process_lines else 'no robot-side UI/yolo/pick processes'
+    summary_parts = []
+    if topic_lines:
+        summary_parts.append('== TOPICS ==\n' + '\n'.join(topic_lines))
+    summary_parts.append(
+        '== PROCESSES ==\n' + '\n'.join(process_lines)
+        if process_lines
+        else '== PROCESSES ==\nno robot-side UI/yolo/pick processes'
+    )
+    process_summary = '\n'.join(summary_parts)
     return {
         'robot': True,
         'yolo': yolo,
@@ -915,6 +1242,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -922,28 +1250,103 @@ class Handler(BaseHTTPRequestHandler):
     def send_error_json(self, exc: Exception, status: int = 500) -> None:
         self.send_json({'ok': False, 'error': str(exc)}, status)
 
+    def add_local_status(self, data: dict) -> dict:
+        data = dict(data)
+        with self.server.stream_lock:
+            active_streams = self.server.active_streams
+        data['active_streams'] = active_streams
+        summary = (data.get('process_summary') or '').strip()
+        local_line = f'local_ui_streams={active_streams}'
+        if local_line not in summary:
+            data['process_summary'] = f'{summary}\n{local_line}' if summary else local_line
+        return data
+
+    def cached_status_payload(self) -> dict:
+        with self.server.status_cache_lock:
+            data = dict(self.server.status_cache)
+            cache_time = self.server.status_cache_time
+        data = self.add_local_status(data)
+        data['status_age_seconds'] = round(max(0.0, time.time() - cache_time), 2) if cache_time else None
+        return data
+
+    def invalidate_status_cache(self) -> None:
+        with self.server.status_cache_lock:
+            self.server.status_cache_time = 0.0
+
+    def handle_status(self, force: bool = False) -> None:
+        now = time.time()
+        with self.server.status_cache_lock:
+            cache_time = self.server.status_cache_time
+        if not force and cache_time and now - cache_time <= self.server.status_cache_ttl:
+            data = self.cached_status_payload()
+            data['status_cached'] = True
+            data['status_refreshing'] = False
+            self.send_json({'ok': True, **data})
+            return
+
+        acquired = self.server.status_lock.acquire(timeout=12.0) if force else self.server.status_lock.acquire(blocking=False)
+        if not acquired:
+            data = self.cached_status_payload()
+            data['status_cached'] = True
+            data['status_refreshing'] = True
+            if not data.get('log'):
+                data['log'] = 'Status refresh is already running; showing the last cached robot state.'
+            self.send_json({'ok': True, **data})
+            return
+
+        try:
+            try:
+                fresh = get_status(self.robot)
+            except Exception as exc:
+                fresh = {
+                    'robot': False,
+                    'yolo': False,
+                    'pick': False,
+                    'log': f'Status check failed: {exc}',
+                    'process_summary': 'status check failed',
+                    'process_count': 0,
+                    'ssid': current_ssid(),
+                    'status_error': str(exc),
+                }
+            with self.server.status_cache_lock:
+                self.server.status_cache = dict(fresh)
+                self.server.status_cache_time = time.time()
+            data = self.add_local_status(fresh)
+            data['status_cached'] = False
+            data['status_refreshing'] = False
+            data['status_age_seconds'] = 0.0
+            self.send_json({'ok': True, **data})
+        finally:
+            self.server.status_lock.release()
+
+    def stop_active_stream(self) -> int:
+        with self.server.stream_lock:
+            old_client = self.server.current_stream_client
+            was_active = self.server.active_streams
+            self.server.current_stream_client = None
+            self.server.stream_generation += 1
+            self.server.active_streams = 0
+        if old_client is not None:
+            try:
+                old_client.close()
+            except Exception:
+                pass
+        return was_active
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == '/':
             body = INDEX_HTML.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
         if parsed.path == '/api/status':
-            try:
-                data = get_status(self.robot)
-                with self.server.stream_lock:
-                    data['active_streams'] = self.server.active_streams
-                if data.get('process_summary'):
-                    data['process_summary'] += f"\nlocal_ui_streams={data['active_streams']}"
-                else:
-                    data['process_summary'] = f"local_ui_streams={data['active_streams']}"
-                self.send_json({'ok': True, **data})
-            except Exception as exc:
-                self.send_error_json(exc, HTTPStatus.BAD_GATEWAY)
+            query = parse_qs(parsed.query)
+            self.handle_status(force=query.get('force', ['0'])[0] in {'1', 'true', 'yes'})
             return
         if parsed.path == '/stream.mjpg':
             self.stream_mjpg(parsed)
@@ -952,49 +1355,150 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == '/api/stop_stream':
+            stopped = self.stop_active_stream()
+            self.send_json({'ok': True, 'message': f'local stream stopped; previous_active_streams={stopped}'})
+            return
+        command_paths = {
+            '/api/reset',
+            '/api/start_vision',
+            '/api/stop_vision',
+            '/api/start_pick',
+            '/api/stop_pick',
+            '/api/drop',
+        }
+        if parsed.path not in command_paths:
+            self.send_error(404)
+            return
+        if not self.server.command_lock.acquire(blocking=False):
+            elapsed = time.time() - self.server.command_started_at if self.server.command_started_at else 0.0
+            self.send_error_json(
+                RuntimeError(f'Another robot command is still running: {self.server.current_command or "unknown"} ({elapsed:.1f}s). Click 重置通信 if it does not finish.'),
+                HTTPStatus.CONFLICT,
+            )
+            return
         try:
+            self.server.current_command = parsed.path
+            self.server.command_started_at = time.time()
             payload = self.read_json()
-            if parsed.path == '/api/start_vision':
-                self.send_json({'ok': True, 'message': start_vision(self.robot, payload)})
+            if parsed.path in {'/api/reset', '/api/start_pick', '/api/stop_pick', '/api/stop_vision'}:
+                self.stop_active_stream()
+            if parsed.path == '/api/reset':
+                message = reset_robot(self.robot)
+            elif parsed.path == '/api/start_vision':
+                message = start_vision(self.robot, payload)
             elif parsed.path == '/api/stop_vision':
-                self.send_json({'ok': True, 'message': stop_vision(self.robot)})
+                message = stop_vision(self.robot)
             elif parsed.path == '/api/start_pick':
-                self.send_json({'ok': True, 'message': start_pick(self.robot, payload)})
+                message = start_pick(self.robot, payload)
             elif parsed.path == '/api/stop_pick':
-                self.send_json({'ok': True, 'message': stop_pick(self.robot)})
+                message = stop_pick(self.robot)
             elif parsed.path == '/api/drop':
-                self.send_json({'ok': True, 'message': drop_block(self.robot)})
-            else:
-                self.send_error(404)
+                message = drop_block(self.robot)
+            self.invalidate_status_cache()
+            self.send_json({'ok': True, 'message': message})
         except Exception as exc:
             self.send_error_json(exc, HTTPStatus.BAD_GATEWAY)
+        finally:
+            self.server.current_command = ''
+            self.server.command_started_at = 0.0
+            self.server.command_lock.release()
+
+    def write_multipart_frame(self, payload: bytes, mime: str) -> None:
+        self.wfile.write(b'--frame\r\n')
+        self.wfile.write(f'Content-Type: {mime}\r\n'.encode('ascii'))
+        self.wfile.write(f'Content-Length: {len(payload)}\r\n\r\n'.encode('ascii'))
+        self.wfile.write(payload)
+        self.wfile.write(b'\r\n')
+        self.wfile.flush()
+
+    def svg_frame(self, message: str) -> bytes:
+        safe = (
+            message.replace('&', '&amp;')
+            .replace('<', '&lt;')
+            .replace('>', '&gt;')
+            .replace('"', '&quot;')
+        )
+        lines = safe.splitlines()[:5] or ['waiting']
+        tspans = []
+        start_y = 210 - max(0, len(lines) - 1) * 18
+        for index, line in enumerate(lines):
+            tspans.append(f'<text x="480" y="{start_y + index * 42}" text-anchor="middle">{line}</text>')
+        svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+<rect width="960" height="540" fill="#111827"/>
+<rect x="80" y="120" width="800" height="300" rx="16" fill="#182234" stroke="#334155"/>
+<g fill="#d5e1f3" font-family="Microsoft YaHei, Segoe UI, sans-serif" font-size="28">{''.join(tspans)}</g>
+<text x="480" y="380" text-anchor="middle" fill="#93a4b8" font-family="Consolas, monospace" font-size="18">HW-9E5ACFD8 / hiwonder</text>
+</svg>'''
+        return svg.encode('utf-8')
 
     def stream_mjpg(self, parsed) -> None:
         query = parse_qs(parsed.query)
         fps = int(query.get('fps', ['8'])[0])
         quality = int(query.get('quality', ['78'])[0])
         client = None
+        old_client = None
         with self.server.stream_lock:
-            if self.server.active_streams >= 1:
-                self.send_error(HTTPStatus.CONFLICT, 'A video stream is already open')
-                return
-            self.server.active_streams += 1
+            old_client = self.server.current_stream_client
+            self.server.current_stream_client = None
+            self.server.stream_generation += 1
+            generation = self.server.stream_generation
+            self.server.active_streams = 1
+        if old_client is not None:
+            try:
+                old_client.close()
+            except Exception:
+                pass
         try:
-            client, stdout, stderr = self.robot.docker_stream(make_stream_script(fps=fps, quality=quality))
+            client, channel = self.robot.docker_stream(make_stream_script(fps=fps, quality=quality))
+            with self.server.stream_lock:
+                if generation != self.server.stream_generation:
+                    return
+                self.server.current_stream_client = client
             self.send_response(200)
             self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
             self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
             self.end_headers()
-            for raw in iter(stdout.readline, ''):
-                if not raw.startswith('__JPEG__'):
-                    continue
-                jpg = base64.b64decode(raw[len('__JPEG__'):].strip())
-                self.wfile.write(b'--frame\r\n')
-                self.wfile.write(b'Content-Type: image/jpeg\r\n')
-                self.wfile.write(f'Content-Length: {len(jpg)}\r\n\r\n'.encode('ascii'))
-                self.wfile.write(jpg)
-                self.wfile.write(b'\r\n')
-                self.wfile.flush()
+            buffer = b''
+            err_buffer = b''
+            last_frame = 0.0
+            last_notice = 0.0
+            self.write_multipart_frame(self.svg_frame('正在连接机器人摄像头和 YOLO 画面...'), 'image/svg+xml')
+            while True:
+                with self.server.stream_lock:
+                    if generation != self.server.stream_generation:
+                        break
+                if channel.recv_ready():
+                    chunk = channel.recv(65536)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    while b'\n' in buffer:
+                        line, buffer = buffer.split(b'\n', 1)
+                        if not line.startswith(b'__JPEG__'):
+                            continue
+                        jpg = base64.b64decode(line[len(b'__JPEG__'):].strip())
+                        self.write_multipart_frame(jpg, 'image/jpeg')
+                        last_frame = time.time()
+                if channel.recv_stderr_ready():
+                    err_buffer = (err_buffer + channel.recv_stderr(8192))[-1200:]
+                if channel.exit_status_ready():
+                    if time.time() - last_frame > 1.0:
+                        detail = err_buffer.decode('utf-8', errors='replace').strip()
+                        self.write_multipart_frame(
+                            self.svg_frame('机器人视频流已结束。\n请点“重置通信”后重新打开画面。' + (f'\n{detail}' if detail else '')),
+                            'image/svg+xml',
+                        )
+                    break
+                now = time.time()
+                if now - last_frame > 4.0 and now - last_notice > 4.0:
+                    detail = err_buffer.decode('utf-8', errors='replace').strip()
+                    self.write_multipart_frame(
+                        self.svg_frame('等待机器人摄像头/YOLO 画面...\n如果长期停在这里，点“重置通信”。' + (f'\n{detail}' if detail else '')),
+                        'image/svg+xml',
+                    )
+                    last_notice = now
+                time.sleep(0.04)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception:
@@ -1006,29 +1510,61 @@ class Handler(BaseHTTPRequestHandler):
             if client is not None:
                 client.close()
             with self.server.stream_lock:
-                self.server.active_streams = max(0, self.server.active_streams - 1)
+                if generation == self.server.stream_generation:
+                    self.server.current_stream_client = None
+                    self.server.active_streams = 0
 
 
-def find_free_port(preferred: int) -> int:
+def existing_ui_running(port: int) -> bool:
+    try:
+        with urlopen(f'http://127.0.0.1:{port}/api/status', timeout=2) as response:
+            data = json.loads(response.read().decode('utf-8', errors='replace'))
+            return response.status == 200 and bool(data.get('ok'))
+    except Exception:
+        return False
+
+
+def find_free_port(preferred: int) -> int | None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
             s.bind(('127.0.0.1', preferred))
             return preferred
         except OSError:
-            pass
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('127.0.0.1', 0))
-        return int(s.getsockname()[1])
+            return None
 
 
 def main():
     args = parse_args()
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     port = find_free_port(args.port)
+    if port is None:
+        if existing_ui_running(args.port):
+            print(f'Robot YOLO control UI is already running: http://127.0.0.1:{args.port}', flush=True)
+            print('Use the existing page, or stop the old robot_yolo_control_ui.py process before restarting.', flush=True)
+            return
+        raise RuntimeError(f'Port {args.port} is already in use by another process. Free it before starting the UI.')
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.robot = Robot(args.host, args.user, args.password, args.container)
     server.active_streams = 0
+    server.current_stream_client = None
+    server.stream_generation = 0
     server.stream_lock = threading.Lock()
+    server.command_lock = threading.Lock()
+    server.current_command = ''
+    server.command_started_at = 0.0
+    server.status_lock = threading.Lock()
+    server.status_cache_lock = threading.Lock()
+    server.status_cache_ttl = 2.0
+    server.status_cache_time = 0.0
+    server.status_cache = {
+        'robot': False,
+        'yolo': False,
+        'pick': False,
+        'log': 'Status has not been checked yet.',
+        'process_summary': 'status not checked yet',
+        'process_count': 0,
+        'ssid': current_ssid(),
+    }
     print(f'Robot YOLO control UI: http://127.0.0.1:{port}', flush=True)
     print('WiFi switching is manual; connect to HW-9E5ACFD8 before using robot controls.', flush=True)
     try:

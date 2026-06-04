@@ -20,6 +20,11 @@ def parse_args():
     parser.add_argument('--center-tolerance', type=float, default=0.028)
     parser.add_argument('--target-area', type=float, default=0.043)
     parser.add_argument('--area-tolerance', type=float, default=0.010)
+    parser.add_argument('--use-depth-distance', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--depth-topic', default='/ascamera/camera_publisher/depth0/image_raw')
+    parser.add_argument('--target-depth', type=float, default=0.32)
+    parser.add_argument('--depth-tolerance', type=float, default=0.025)
+    parser.add_argument('--depth-roi-scale', type=float, default=0.45)
     parser.add_argument('--stable-frames', type=int, default=4)
     parser.add_argument('--detection-stream-timeout', type=float, default=20.0)
     parser.add_argument('--control-mode', default='mpc', choices=['p', 'mpc'])
@@ -29,6 +34,11 @@ def parse_args():
     parser.add_argument('--place-action', default='navigation_place')
     parser.add_argument('--pregrasp-visual-servo', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--visual-servo-period', type=float, default=0.10)
+    parser.add_argument('--visual-servo-command-seconds', type=float, default=0.04)
+    parser.add_argument('--adaptive-servo-timing', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--visual-servo-min-period', type=float, default=0.035)
+    parser.add_argument('--visual-servo-max-period', type=float, default=0.16)
+    parser.add_argument('--visual-servo-period-scale', type=float, default=1.05)
     parser.add_argument('--pregrasp-time-scale', type=float, default=2.4)
     parser.add_argument('--pregrasp-min-step-seconds', type=float, default=0.80)
     parser.add_argument('--pregrasp-settle-seconds', type=float, default=0.70)
@@ -59,6 +69,7 @@ def build_remote_script(args) -> str:
     pick_action = shlex.quote(args.pick_action)
     place_action = shlex.quote(args.place_action)
     control_mode = shlex.quote(args.control_mode)
+    depth_topic = shlex.quote(args.depth_topic)
     return f'''
 set +e
 source /opt/ros/humble/setup.bash
@@ -140,6 +151,18 @@ run_attempt() {{
     wait_for_detection_stream:=true \\
     detection_stream_timeout:={args.detection_stream_timeout:.1f} \\
     detection_ready_min_messages:=1 \\
+    use_depth_distance:={bool_text(args.use_depth_distance)} \\
+    depth_topic:={depth_topic} \\
+    depth_stale_seconds:=0.800 \\
+    depth_unit_scale:=0.001 \\
+    depth_roi_scale:={args.depth_roi_scale:.3f} \\
+    depth_sample_grid:=5 \\
+    depth_min_valid_samples:=3 \\
+    depth_min_m:=0.080 \\
+    depth_max_m:=1.500 \\
+    pick_target_depth_m:={args.target_depth:.3f} \\
+    pick_depth_tolerance_m:={args.depth_tolerance:.3f} \\
+    pick_preclose_target_depth_m:=-1.0 \\
     desired_center_x_ratio:={args.center:.4f} \\
     center_tolerance_ratio:={args.center_tolerance:.4f} \\
     pick_target_area_ratio:={args.target_area:.4f} \\
@@ -148,6 +171,12 @@ run_attempt() {{
     control_mode:={control_mode} \\
     closed_loop_pick:={bool_text(args.closed_loop_pick)} \\
     visual_servo_period:={args.visual_servo_period:.3f} \\
+    visual_servo_command_seconds:={args.visual_servo_command_seconds:.3f} \\
+    adaptive_servo_timing:={bool_text(args.adaptive_servo_timing)} \\
+    visual_servo_min_period:={args.visual_servo_min_period:.3f} \\
+    visual_servo_max_period:={args.visual_servo_max_period:.3f} \\
+    visual_servo_period_scale:={args.visual_servo_period_scale:.3f} \\
+    require_fresh_detection_for_control:=true \\
     pick_pregrasp_visual_servo:={bool_text(args.pregrasp_visual_servo)} \\
     pick_pregrasp_time_scale:={args.pregrasp_time_scale:.3f} \\
     pick_pregrasp_min_step_seconds:={args.pregrasp_min_step_seconds:.3f} \\
