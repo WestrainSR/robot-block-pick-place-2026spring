@@ -1,9 +1,13 @@
 classes:
-  - red
-  - green
+  - gray
+  - yellow
+  - glass
+  - grass
   - blue
 
 aliases:
-  red: [red, hong, red_block]
-  green: [green, lv, green_block]
+  gray: [gray, grey, gray_block, grey_block]
+  yellow: [yellow, yellow_block]
+  glass: [glass, blue, glass_block, blue_block]
+  grass: [grass, green, grass_block, green_block]
   blue: [blue, lan, blue_block]

@@ -16,7 +16,8 @@ from geometry_msgs.msg import PoseStamped, Twist
 from interfaces.msg import ObjectsInfo
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import CameraInfo, Image
 from std_srvs.srv import Trigger
 
 try:
@@ -81,10 +82,35 @@ class DistanceEstimate:
     value: Optional[float]
     target: float
     tolerance: float
+    lateral_error: Optional[float] = None
+    lateral_target: Optional[float] = None
+    lateral_tolerance: Optional[float] = None
+    pose: Optional['PoseEstimate'] = None
+
+
+@dataclass
+class PoseEstimate:
+    u: float
+    v: float
+    depth_m: float
+    camera_x: float
+    camera_y: float
+    camera_z: float
+    robot_x: float
+    robot_y: float
+    robot_z: float
 
 
 class CompetitionPickPlace(Node):
-    VALID_TARGETS = {'red', 'green', 'blue'}
+    VALID_TARGETS = {'gray', 'grey', 'yellow', 'glass', 'grass', 'blue'}
+    DEFAULT_TARGET_ALIASES = {
+        'gray': {'gray', 'grey'},
+        'grey': {'gray', 'grey'},
+        'glass': {'glass', 'blue'},
+        'grass': {'grass', 'green'},
+        'yellow': {'yellow'},
+        'blue': {'blue'},
+    }
 
     def __init__(self) -> None:
         super().__init__(
@@ -97,19 +123,23 @@ class CompetitionPickPlace(Node):
         self.shutdown_requested = False
         self.detection_lock = threading.Lock()
         self.depth_lock = threading.Lock()
+        self.camera_info_lock = threading.Lock()
         self.servo_state_lock = threading.Lock()
         self.latest_detections: Dict[str, Detection] = {}
         self.latest_depth_msg: Optional[Image] = None
+        self.latest_camera_k: Optional[List[float]] = None
         self.last_msg_time = 0.0
         self.last_depth_time = 0.0
+        self.last_camera_info_time = 0.0
         self.detection_message_count = 0
         self.depth_message_count = 0
+        self.camera_info_message_count = 0
         self.detection_period_ema = 0.0
         self.latest_servo_positions: Dict[int, int] = {}
         self.last_servo_state_time = 0.0
 
         share_dir = get_package_share_directory('competition_pick_place')
-        self.declare_parameter('target_class', 'red')
+        self.declare_parameter('target_class', 'grass')
         self.declare_parameter('target_sequence', '')
         self.declare_parameter('target_aliases', '')
         self.declare_parameter('place_class', '')
@@ -123,18 +153,32 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('detection_topic', '/yolo_node/object_detect')
         self.declare_parameter('use_depth_distance', True)
         self.declare_parameter('depth_topic', '/ascamera/camera_publisher/depth0/image_raw')
+        self.declare_parameter('camera_info_topic', '/ascamera/camera_publisher/rgb0/camera_info')
+        self.declare_parameter('use_robot_frame_distance', True)
+        self.declare_parameter('camera_tilt_deg', 45.0)
+        self.declare_parameter('camera_height_m', 0.22)
+        self.declare_parameter('camera_offset_x_m', 0.06)
+        self.declare_parameter('depth_roi_pixels', 15)
         self.declare_parameter('depth_stale_seconds', 0.8)
         self.declare_parameter('depth_unit_scale', 0.001)
         self.declare_parameter('depth_roi_scale', 0.45)
         self.declare_parameter('depth_sample_grid', 5)
-        self.declare_parameter('depth_min_valid_samples', 3)
+        self.declare_parameter('depth_min_valid_samples', 20)
         self.declare_parameter('depth_min_m', 0.08)
         self.declare_parameter('depth_max_m', 1.50)
         self.declare_parameter('pick_target_depth_m', 0.32)
+        self.declare_parameter('pick_target_robot_x_m', 0.32)
+        self.declare_parameter('pick_target_robot_y_m', 0.0)
+        self.declare_parameter('pick_robot_x_tolerance_m', 0.025)
+        self.declare_parameter('pick_robot_y_tolerance_m', 0.025)
+        self.declare_parameter('place_target_robot_x_m', 0.145)
+        self.declare_parameter('place_target_robot_y_m', 0.0)
+        self.declare_parameter('place_robot_x_tolerance_m', 0.015)
+        self.declare_parameter('place_robot_y_tolerance_m', 0.015)
         self.declare_parameter('pick_depth_tolerance_m', 0.025)
         self.declare_parameter('pick_preclose_target_depth_m', -1.0)
         self.declare_parameter('cmd_vel_topic', '/controller/cmd_vel')
-        self.declare_parameter('min_score', 0.70)
+        self.declare_parameter('min_score', 0.20)
         self.declare_parameter('search_timeout', 18.0)
         self.declare_parameter('align_timeout', 24.0)
         self.declare_parameter('place_align_timeout', 18.0)
@@ -143,6 +187,7 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('wait_for_detection_stream', True)
         self.declare_parameter('detection_stream_timeout', 20.0)
         self.declare_parameter('detection_ready_min_messages', 1)
+        self.declare_parameter('wait_for_target_before_search', True)
         self.declare_parameter('desired_center_x_ratio', 0.50)
         self.declare_parameter('center_tolerance_ratio', 0.055)
         self.declare_parameter('pick_target_area_ratio', 0.043)
@@ -158,8 +203,11 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('visual_servo_min_period', 0.035)
         self.declare_parameter('visual_servo_max_period', 0.16)
         self.declare_parameter('visual_servo_period_scale', 1.05)
-        self.declare_parameter('require_fresh_detection_for_control', True)
+        self.declare_parameter('require_fresh_detection_for_control', False)
         self.declare_parameter('pick_pregrasp_visual_servo', True)
+        self.declare_parameter('open_gripper_before_approach', True)
+        self.declare_parameter('gripper_open_position', 200)
+        self.declare_parameter('gripper_open_duration', 0.30)
         self.declare_parameter('pick_pregrasp_time_scale', 1.0)
         self.declare_parameter('pick_pregrasp_min_step_seconds', 0.0)
         self.declare_parameter('pick_pregrasp_settle_seconds', 0.0)
@@ -174,6 +222,9 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('pick_pregrasp_steps', '1,2')
         self.declare_parameter('pick_close_steps', '3,4')
         self.declare_parameter('pick_lift_steps', '5,6')
+        self.declare_parameter('place_steps', '')
+        self.declare_parameter('hold_after_place', True)
+        self.declare_parameter('hold_place_steps', '1,2')
         self.declare_parameter('pick_retry_attempts', 3)
         self.declare_parameter('grasp_check_enabled', True)
         self.declare_parameter('gripper_state_topic', '/controller_manager/servo_states')
@@ -199,6 +250,7 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('mpc_delta_weight', 0.16)
         self.declare_parameter('mpc_terminal_weight', 2.2)
         self.declare_parameter('mpc_center_gate_ratio', 0.12)
+        self.declare_parameter('mpc_forward_lateral_gate', 0.10)
         self.declare_parameter('pick_action', 'navigation_pick')
         self.declare_parameter('place_action', 'navigation_place')
         self.declare_parameter('init_action', 'navigation_pick_init')
@@ -209,7 +261,7 @@ class CompetitionPickPlace(Node):
             self.get_parameter('target_sequence').value,
             self.target_class,
         )
-        self.place_class = str(self.get_parameter('place_class').value).strip()
+        self.place_class = self.normalize_place_class(self.get_parameter('place_class').value)
         self.dry_run = bool(self.get_parameter('dry_run').value)
         self.stop_after_pick = bool(self.get_parameter('stop_after_pick').value)
         self.use_nav = bool(self.get_parameter('use_nav').value)
@@ -233,10 +285,16 @@ class CompetitionPickPlace(Node):
         )
         if bool(self.get_parameter('use_depth_distance').value):
             self.create_subscription(
+                CameraInfo,
+                str(self.get_parameter('camera_info_topic').value),
+                self.camera_info_callback,
+                qos_profile_sensor_data,
+            )
+            self.create_subscription(
                 Image,
                 str(self.get_parameter('depth_topic').value),
                 self.depth_callback,
-                5,
+                qos_profile_sensor_data,
             )
         if ServoStateList is not None:
             self.create_subscription(
@@ -284,8 +342,15 @@ class CompetitionPickPlace(Node):
             targets = [str(part).strip() for part in value if str(part).strip()]
         return targets or [fallback]
 
+    def normalize_place_class(self, value: str) -> str:
+        target = str(value or '').strip().lower()
+        if target in {'glass', 'grass', 'green'}:
+            self.get_logger().warn(f'normalize legacy place_class {target!r} -> "blue"')
+            return 'blue'
+        return target
+
     def target_names_for(self, target: str) -> set:
-        names = {target}
+        names = set(self.DEFAULT_TARGET_ALIASES.get(target, {target}))
         if len(self.target_sequence) == 1:
             names.update(self.target_aliases)
         return names
@@ -323,7 +388,13 @@ class CompetitionPickPlace(Node):
                     self.detection_period_ema = interval
                 else:
                     self.detection_period_ema = 0.75 * self.detection_period_ema + 0.25 * interval
-            self.latest_detections = fresh
+            for name, det in fresh.items():
+                self.latest_detections[name] = det
+            self.latest_detections = {
+                name: det
+                for name, det in self.latest_detections.items()
+                if now - det.stamp <= self.stale_seconds
+            }
             self.last_msg_time = now
             self.detection_message_count += 1
 
@@ -332,6 +403,12 @@ class CompetitionPickPlace(Node):
             self.latest_depth_msg = msg
             self.last_depth_time = time.monotonic()
             self.depth_message_count += 1
+
+    def camera_info_callback(self, msg: CameraInfo) -> None:
+        with self.camera_info_lock:
+            self.latest_camera_k = list(msg.k)
+            self.last_camera_info_time = time.monotonic()
+            self.camera_info_message_count += 1
 
     def servo_state_callback(self, msg) -> None:
         now = time.monotonic()
@@ -373,6 +450,8 @@ class CompetitionPickPlace(Node):
 
                 self.set_phase(Phase.NAV_TO_MATERIAL, f'{prefix}: going to material standoff')
                 self.navigate_to('material_standoff_pose')
+                if bool(self.get_parameter('open_gripper_before_approach').value):
+                    self.open_gripper_for_approach(f'{target} approach')
 
                 self.set_phase(Phase.SEARCH_TARGET, f'{prefix}: searching {sorted(target_names)}')
                 self.visual_servo_to_classes(
@@ -396,18 +475,27 @@ class CompetitionPickPlace(Node):
                 self.navigate_to('place_standoff_pose')
 
                 if self.place_class:
-                    self.set_phase(Phase.ALIGN_PLACE, f'{prefix}: aligning place marker {self.place_class}')
+                    place_names = self.target_names_for(self.place_class)
+                    self.set_phase(Phase.ALIGN_PLACE, f'{prefix}: aligning place marker {sorted(place_names)}')
                     self.visual_servo_to_classes(
-                        names={self.place_class},
+                        names=place_names,
                         timeout=float(self.get_parameter('place_align_timeout').value),
-                        target_area=float(self.get_parameter('place_target_area_ratio').value),
+                        target_area=float(self.get_parameter('pick_target_area_ratio').value),
                         label='place marker',
+                        target_robot_x=float(self.get_parameter('place_target_robot_x_m').value),
+                        target_robot_y=float(self.get_parameter('place_target_robot_y_m').value),
+                        robot_x_tolerance=float(self.get_parameter('place_robot_x_tolerance_m').value),
+                        robot_y_tolerance=float(self.get_parameter('place_robot_y_tolerance_m').value),
                     )
                 else:
                     self.get_logger().warn('place_class is empty; placement uses Nav2 standoff plus calibrated action group')
 
                 self.set_phase(Phase.PLACE, f'{prefix}: running place action group')
-                self.run_action_group(str(self.get_parameter('place_action').value), f'{target} place')
+                place_steps = self.resolve_place_steps()
+                if place_steps:
+                    self.run_action_group_steps(str(self.get_parameter('place_action').value), place_steps, f'{target} place')
+                else:
+                    self.run_action_group(str(self.get_parameter('place_action').value), f'{target} place')
 
             self.set_phase(Phase.NAV_HOME, 'returning home')
             self.navigate_to('return_pose')
@@ -495,6 +583,10 @@ class CompetitionPickPlace(Node):
         stable_frames: Optional[int] = None,
         target_depth: Optional[float] = None,
         depth_tolerance: Optional[float] = None,
+        target_robot_x: Optional[float] = None,
+        target_robot_y: Optional[float] = None,
+        robot_x_tolerance: Optional[float] = None,
+        robot_y_tolerance: Optional[float] = None,
     ) -> None:
         names = set(names)
         desired_center = (
@@ -526,7 +618,7 @@ class CompetitionPickPlace(Node):
             )
             return
 
-        self.wait_until_detection_stream_ready(label, timeout)
+        self.wait_until_detection_stream_ready(label, timeout, names=names)
         start = time.monotonic()
         found_deadline = start + min(float(self.get_parameter('search_timeout').value), timeout)
         align_deadline = start + timeout
@@ -535,6 +627,7 @@ class CompetitionPickPlace(Node):
         last_log = 0.0
         found_once = False
         last_control_seq = -1
+        last_seen_center_error: Optional[float] = None
         center_tol = center_tolerance
         area_tol = area_tolerance
 
@@ -549,19 +642,28 @@ class CompetitionPickPlace(Node):
                     raise RuntimeError(f'{label} not found before alignment timeout')
                 if not found_once and now > found_deadline:
                     raise RuntimeError(f'{label} not found before search timeout')
-                self.publish_search_twist(period)
+                self.stop_robot()
                 if now - last_log > 1.5:
-                    self.get_logger().info(f'searching {label}; detections={self.visible_classes()}')
+                    self.get_logger().info(
+                        f'waiting {label}; target not visible, found_once={found_once}, '
+                        f'detections={self.visible_classes()}'
+                    )
                     last_log = now
+                time.sleep(period)
                 continue
 
             found_once = True
             if now > align_deadline:
                 raise RuntimeError(f'{label} alignment timeout')
 
-            center_error = det.cx_ratio - desired_center
             if self.should_wait_for_fresh_detection(det, last_control_seq):
                 self.stop_robot()
+                if now - last_log > 0.8:
+                    self.get_logger().info(
+                        f'waiting fresh detection for {label}: '
+                        f'class={det.class_name} seq={det.seq} last_control_seq={last_control_seq}'
+                    )
+                    last_log = now
                 time.sleep(period)
                 continue
             last_control_seq = det.seq
@@ -571,40 +673,83 @@ class CompetitionPickPlace(Node):
                 area_tolerance=area_tol,
                 target_depth=target_depth,
                 depth_tolerance=depth_tolerance,
+                target_robot_x=target_robot_x,
+                target_robot_y=target_robot_y,
+                robot_x_tolerance=robot_x_tolerance,
+                robot_y_tolerance=robot_y_tolerance,
+            )
+            if bool(self.get_parameter('use_robot_frame_distance').value) and distance.source != 'robot_frame':
+                stable = 0
+                self.stop_robot()
+                if now - last_log > 0.8:
+                    self.log_alignment_state(
+                        label=label,
+                        det=det,
+                        distance=distance,
+                        center_error=det.cx_ratio - desired_center,
+                        center_tolerance=center_tol,
+                        twist=None,
+                        prefix='waiting robot-frame pose',
+                    )
+                    last_log = now
+                time.sleep(period)
+                continue
+            center_error = (
+                distance.lateral_error
+                if distance.lateral_error is not None
+                else det.cx_ratio - desired_center
+            )
+            last_seen_center_error = center_error
+            active_center_tol = (
+                distance.lateral_tolerance
+                if distance.lateral_tolerance is not None
+                else center_tol
             )
 
-            if abs(center_error) <= center_tol and distance.aligned:
+            if abs(center_error) <= active_center_tol and distance.aligned:
                 stable += 1
                 self.stop_robot()
                 if stable >= stable_required:
-                    self.get_logger().info(
-                        f'{label} aligned: class={det.class_name}, score={det.score:.2f}, '
-                        f'cx={det.cx_ratio:.3f}, area={det.area_ratio:.3f}, '
-                        f'distance_source={distance.source}, value={self.format_optional(distance.value)}, '
-                        f'target={distance.target:.3f}, desired_cx={desired_center:.3f}'
+                    self.log_alignment_state(
+                        label=label,
+                        det=det,
+                        distance=distance,
+                        center_error=center_error,
+                        center_tolerance=active_center_tol,
+                        twist=None,
+                        prefix='aligned',
                     )
                     return
                 time.sleep(period)
                 continue
 
             stable = 0
-            twist = self.compute_visual_servo_twist(center_error, distance.error, center_tol)
+            twist = self.compute_visual_servo_twist(distance, center_error, active_center_tol)
             if now - last_log > 0.8:
-                self.get_logger().info(
-                    f'visual servo {label}: mode={self.control_mode} class={det.class_name} score={det.score:.2f} '
-                    f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f} '
-                    f'distance_source={distance.source} value={self.format_optional(distance.value)} '
-                    f'target={distance.target:.3f} error={distance.error:.3f} '
-                    f'cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})'
+                self.log_alignment_state(
+                    label=label,
+                    det=det,
+                    distance=distance,
+                    center_error=center_error,
+                    center_tolerance=active_center_tol,
+                    twist=twist,
+                    prefix='visual servo',
                 )
                 last_log = now
             self.publish_control_pulse(twist, period)
 
         raise RuntimeError('stop requested during alignment')
 
-    def wait_until_detection_stream_ready(self, label: str, align_timeout: float) -> None:
+    def wait_until_detection_stream_ready(
+        self,
+        label: str,
+        align_timeout: float,
+        names: Optional[Iterable[str]] = None,
+    ) -> None:
         if not bool(self.get_parameter('wait_for_detection_stream').value):
             return
+        target_names = set(names or [])
+        require_target = bool(self.get_parameter('wait_for_target_before_search').value) and bool(target_names)
         min_messages = max(1, int(self.get_parameter('detection_ready_min_messages').value))
         timeout = min(float(self.get_parameter('detection_stream_timeout').value), max(1.0, align_timeout))
         deadline = time.monotonic() + timeout
@@ -615,31 +760,59 @@ class CompetitionPickPlace(Node):
                 count = self.detection_message_count
                 last_msg_age = time.monotonic() - self.last_msg_time if self.last_msg_time > 0.0 else float('inf')
                 visible = sorted(self.latest_detections)
-            if count >= min_messages and last_msg_age <= self.stale_seconds:
+                target_visible = any(name in self.latest_detections for name in target_names)
+            stream_ready = count >= min_messages and last_msg_age <= self.stale_seconds
+            if stream_ready and (target_visible or not require_target):
                 self.get_logger().info(
-                    f'YOLO detection stream ready for {label}: messages={count}, visible={visible}'
+                    f'YOLO detection stream ready for {label}: messages={count}, visible={visible}, '
+                    f'target_visible={target_visible}'
                 )
                 return
             now = time.monotonic()
             if now > deadline:
                 raise RuntimeError(
                     f'YOLO detection stream not ready before {timeout:.1f}s for {label}; '
-                    f'messages={count}, visible={visible}'
+                    f'messages={count}, visible={visible}, target_names={sorted(target_names)}, '
+                    f'target_visible={target_visible}'
                 )
             self.stop_robot()
             if now - last_log > 1.0:
                 publisher_count = self.count_publishers(str(self.get_parameter('detection_topic').value))
                 self.get_logger().info(
                     f'waiting YOLO detection stream for {label}: '
-                    f'publishers={publisher_count}, messages={count}, visible={visible}'
+                    f'publishers={publisher_count}, messages={count}, visible={visible}, '
+                    f'target_names={sorted(target_names)}, target_visible={target_visible}'
                 )
                 last_log = now
             time.sleep(period)
 
-    def compute_visual_servo_twist(self, center_error: float, area_error: float, center_tol: float) -> Twist:
+    def compute_visual_servo_twist(self, distance: DistanceEstimate, center_error: float, center_tol: float) -> Twist:
+        if distance.source == 'robot_frame' and distance.lateral_error is not None:
+            return self.compute_robot_frame_twist(distance)
         if self.control_mode == 'mpc':
-            return self.compute_mpc_twist(center_error, area_error, center_tol)
-        return self.compute_p_twist(center_error, area_error, center_tol)
+            return self.compute_mpc_twist(center_error, distance.error, center_tol)
+        return self.compute_p_twist(center_error, distance.error, center_tol)
+
+    def compute_robot_frame_twist(self, distance: DistanceEstimate) -> Twist:
+        twist = Twist()
+        max_linear = float(self.get_parameter('max_linear_speed').value)
+        max_angular = float(self.get_parameter('max_angular_speed').value)
+        linear_sign = float(self.get_parameter('linear_sign').value)
+        angular_sign = float(self.get_parameter('angular_sign').value)
+        x_error = distance.error
+        y_error = float(distance.lateral_error or 0.0)
+        x_tol = max(0.001, distance.tolerance)
+        y_tol = max(0.001, float(distance.lateral_tolerance or x_tol))
+
+        if abs(x_error) > x_tol:
+            linear_mag = self.clamp(abs(x_error) * 1.8, min(0.04, max_linear), max_linear)
+            twist.linear.x = linear_sign * math.copysign(linear_mag, x_error)
+
+        if abs(y_error) > y_tol:
+            angular_mag = self.clamp(abs(y_error) * 4.0, min(0.12, max_angular), max_angular)
+            twist.angular.z = angular_sign * math.copysign(angular_mag, y_error)
+
+        return twist
 
     def should_wait_for_fresh_detection(self, det: Detection, last_control_seq: int) -> bool:
         return (
@@ -661,7 +834,54 @@ class CompetitionPickPlace(Node):
         area_tolerance: float,
         target_depth: Optional[float],
         depth_tolerance: Optional[float],
+        target_robot_x: Optional[float] = None,
+        target_robot_y: Optional[float] = None,
+        robot_x_tolerance: Optional[float] = None,
+        robot_y_tolerance: Optional[float] = None,
     ) -> DistanceEstimate:
+        if bool(self.get_parameter('use_robot_frame_distance').value):
+            target_x = float(self.get_parameter('pick_target_robot_x_m').value) if target_robot_x is None else float(target_robot_x)
+            target_y = float(self.get_parameter('pick_target_robot_y_m').value) if target_robot_y is None else float(target_robot_y)
+            tol_x = max(
+                0.001,
+                float(self.get_parameter('pick_robot_x_tolerance_m').value)
+                if robot_x_tolerance is None
+                else float(robot_x_tolerance),
+            )
+            tol_y = max(
+                0.001,
+                float(self.get_parameter('pick_robot_y_tolerance_m').value)
+                if robot_y_tolerance is None
+                else float(robot_y_tolerance),
+            )
+            pose = self.estimate_detection_pose(det)
+            if pose is not None:
+                forward_error = pose.robot_x - target_x
+                lateral_error = target_y - pose.robot_y
+                return DistanceEstimate(
+                    error=forward_error,
+                    aligned=abs(forward_error) <= tol_x and abs(lateral_error) <= tol_y,
+                    source='robot_frame',
+                    value=pose.robot_x,
+                    target=target_x,
+                    tolerance=tol_x,
+                    lateral_error=lateral_error,
+                    lateral_target=target_y,
+                    lateral_tolerance=tol_y,
+                    pose=pose,
+                )
+            return DistanceEstimate(
+                error=float('inf'),
+                aligned=False,
+                source='robot_frame_wait',
+                value=None,
+                target=target_x,
+                tolerance=tol_x,
+                lateral_error=None,
+                lateral_target=target_y,
+                lateral_tolerance=tol_y,
+            )
+
         depth_target = self.valid_optional_depth(target_depth)
         if bool(self.get_parameter('use_depth_distance').value) and depth_target is not None:
             depth_m = self.estimate_detection_depth_m(det)
@@ -676,15 +896,23 @@ class CompetitionPickPlace(Node):
                     target=depth_target,
                     tolerance=tolerance,
                 )
+            tolerance = max(0.001, float(depth_tolerance or self.get_parameter('pick_depth_tolerance_m').value))
+            return DistanceEstimate(
+                error=float('inf'),
+                aligned=False,
+                source='depth_wait',
+                value=None,
+                target=depth_target,
+                tolerance=tolerance,
+            )
 
-        error = target_area - det.area_ratio
         return DistanceEstimate(
-            error=error,
-            aligned=abs(error) <= area_tolerance,
-            source='area',
-            value=det.area_ratio,
-            target=target_area,
-            tolerance=area_tolerance,
+            error=0.0,
+            aligned=True,
+            source='center_only',
+            value=None,
+            target=0.0,
+            tolerance=0.0,
         )
 
     def estimate_detection_depth_m(self, det: Detection) -> Optional[float]:
@@ -696,38 +924,104 @@ class CompetitionPickPlace(Node):
             return None
         return self.sample_depth_roi_m(msg, det)
 
-    def sample_depth_roi_m(self, msg: Image, det: Detection) -> Optional[float]:
+    def estimate_detection_pose(self, det: Detection) -> Optional[PoseEstimate]:
+        now = time.monotonic()
+        with self.depth_lock:
+            depth_msg = self.latest_depth_msg
+            depth_stamp = self.last_depth_time
+        with self.camera_info_lock:
+            camera_k = list(self.latest_camera_k) if self.latest_camera_k is not None else None
+        if depth_msg is None or now - depth_stamp > float(self.get_parameter('depth_stale_seconds').value):
+            return None
+        if camera_k is None or len(camera_k) < 6:
+            return None
+
+        center = self.detection_center_in_depth_pixels(depth_msg, det)
+        if center is None:
+            return None
+        u, v = center
+        depth_m = self.sample_depth_roi_m(depth_msg, det, center=center)
+        if depth_m is None:
+            return None
+
+        fx = float(camera_k[0])
+        fy = float(camera_k[4])
+        cx_img = float(camera_k[2])
+        cy_img = float(camera_k[5])
+        if abs(fx) < 1e-6 or abs(fy) < 1e-6:
+            return None
+
+        scale_x = float(depth_msg.width) / max(1, det.width)
+        scale_y = float(depth_msg.height) / max(1, det.height)
+        if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
+            cx_img *= scale_x
+            cy_img *= scale_y
+            fx *= scale_x
+            fy *= scale_y
+
+        camera_x = (u - cx_img) * depth_m / fx
+        camera_y = (v - cy_img) * depth_m / fy
+        camera_z = depth_m
+        robot_x, robot_y, robot_z = self.transform_camera_to_robot(camera_x, camera_y, camera_z)
+        return PoseEstimate(
+            u=u,
+            v=v,
+            depth_m=depth_m,
+            camera_x=camera_x,
+            camera_y=camera_y,
+            camera_z=camera_z,
+            robot_x=robot_x,
+            robot_y=robot_y,
+            robot_z=robot_z,
+        )
+
+    def transform_camera_to_robot(self, camera_x: float, camera_y: float, camera_z: float) -> Tuple[float, float, float]:
+        theta = math.radians(float(self.get_parameter('camera_tilt_deg').value))
+        height = float(self.get_parameter('camera_height_m').value)
+        offset_x = float(self.get_parameter('camera_offset_x_m').value)
+        robot_x = camera_z * math.cos(theta) - camera_y * math.sin(theta) + offset_x
+        robot_y = -camera_x
+        vertical_drop = camera_y * math.cos(theta) + camera_z * math.sin(theta)
+        robot_z = height - vertical_drop
+        return robot_x, robot_y, robot_z
+
+    def detection_center_in_depth_pixels(self, msg: Image, det: Detection) -> Optional[Tuple[float, float]]:
+        if msg.width <= 0 or msg.height <= 0 or det.width <= 0 or det.height <= 0:
+            return None
+        scale_x = float(msg.width) / max(1, det.width)
+        scale_y = float(msg.height) / max(1, det.height)
+        u = ((det.box[0] + det.box[2]) * 0.5) * scale_x
+        v = ((det.box[1] + det.box[3]) * 0.5) * scale_y
+        if u < 0 or u >= msg.width or v < 0 or v >= msg.height:
+            return None
+        return u, v
+
+    def sample_depth_roi_m(
+        self,
+        msg: Image,
+        det: Detection,
+        center: Optional[Tuple[float, float]] = None,
+    ) -> Optional[float]:
         encoding = str(msg.encoding or '').upper()
         if encoding not in {'16UC1', 'MONO16', '32FC1'}:
             return None
         if msg.width <= 0 or msg.height <= 0 or msg.step <= 0:
             return None
 
-        scale_x = float(msg.width) / max(1, det.width)
-        scale_y = float(msg.height) / max(1, det.height)
-        x1 = self.clamp(det.box[0] * scale_x, 0, msg.width - 1)
-        y1 = self.clamp(det.box[1] * scale_y, 0, msg.height - 1)
-        x2 = self.clamp(det.box[2] * scale_x, 0, msg.width - 1)
-        y2 = self.clamp(det.box[3] * scale_y, 0, msg.height - 1)
-        if x2 <= x1 or y2 <= y1:
+        if center is None:
+            center = self.detection_center_in_depth_pixels(msg, det)
+        if center is None:
             return None
+        cx, cy = center
+        radius = max(1, int(self.get_parameter('depth_roi_pixels').value))
+        rx1 = int(self.clamp(cx - radius, 0, msg.width - 1))
+        rx2 = int(self.clamp(cx + radius, 0, msg.width - 1))
+        ry1 = int(self.clamp(cy - radius, 0, msg.height - 1))
+        ry2 = int(self.clamp(cy + radius, 0, msg.height - 1))
 
-        cx = (x1 + x2) * 0.5
-        cy = (y1 + y2) * 0.5
-        roi_scale = self.clamp(float(self.get_parameter('depth_roi_scale').value), 0.05, 1.0)
-        half_w = max(1.0, (x2 - x1) * roi_scale * 0.5)
-        half_h = max(1.0, (y2 - y1) * roi_scale * 0.5)
-        rx1 = int(self.clamp(cx - half_w, 0, msg.width - 1))
-        rx2 = int(self.clamp(cx + half_w, 0, msg.width - 1))
-        ry1 = int(self.clamp(cy - half_h, 0, msg.height - 1))
-        ry2 = int(self.clamp(cy + half_h, 0, msg.height - 1))
-
-        grid = max(1, int(self.get_parameter('depth_sample_grid').value))
         samples: List[float] = []
-        for gy in range(grid):
-            y = int(round(ry1 + (ry2 - ry1) * (gy + 0.5) / grid))
-            for gx in range(grid):
-                x = int(round(rx1 + (rx2 - rx1) * (gx + 0.5) / grid))
+        for y in range(ry1, ry2 + 1):
+            for x in range(rx1, rx2 + 1):
                 depth = self.read_depth_pixel_m(msg, x, y, encoding)
                 if depth is not None and self.depth_is_valid(depth):
                     samples.append(depth)
@@ -735,8 +1029,7 @@ class CompetitionPickPlace(Node):
         min_samples = max(1, int(self.get_parameter('depth_min_valid_samples').value))
         if len(samples) < min_samples:
             return None
-        samples.sort()
-        return samples[len(samples) // 2]
+        return sum(samples) / len(samples)
 
     def read_depth_pixel_m(self, msg: Image, x: int, y: int, encoding: str) -> Optional[float]:
         byteorder = 'big' if bool(msg.is_bigendian) else 'little'
@@ -772,6 +1065,36 @@ class CompetitionPickPlace(Node):
     def format_optional(value: Optional[float]) -> str:
         return 'none' if value is None else f'{value:.3f}'
 
+    def log_alignment_state(
+        self,
+        label: str,
+        det: Detection,
+        distance: DistanceEstimate,
+        center_error: float,
+        center_tolerance: float,
+        twist: Optional[Twist],
+        prefix: str,
+    ) -> None:
+        cmd = 'cmd=(0.000,0.000)' if twist is None else f'cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})'
+        pose_text = ''
+        if distance.pose is not None:
+            pose = distance.pose
+            pose_text = (
+                f' u={pose.u:.1f} v={pose.v:.1f} depth={pose.depth_m:.3f} '
+                f'camera_xyz=({pose.camera_x:.3f},{pose.camera_y:.3f},{pose.camera_z:.3f}) '
+                f'robot_xyz=({pose.robot_x:.3f},{pose.robot_y:.3f},{pose.robot_z:.3f}) '
+                f'robot_y_target={self.format_optional(distance.lateral_target)} '
+                f'robot_y_error={self.format_optional(distance.lateral_error)} '
+                f'robot_y_tol={self.format_optional(distance.lateral_tolerance)}'
+            )
+        self.get_logger().info(
+            f'{prefix} {label}: mode={self.control_mode} class={det.class_name} score={det.score:.2f} '
+            f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f} '
+            f'source={distance.source} value={self.format_optional(distance.value)} '
+            f'target={distance.target:.3f} error={distance.error:.3f} tol={distance.tolerance:.3f} '
+            f'lateral_error={center_error:.3f} lateral_tol={center_tolerance:.3f}{pose_text} {cmd}'
+        )
+
     def compute_p_twist(self, center_error: float, area_error: float, center_tol: float) -> Twist:
         twist = Twist()
         angular = (
@@ -795,7 +1118,9 @@ class CompetitionPickPlace(Node):
     def compute_mpc_twist(self, center_error: float, area_error: float, center_tol: float) -> Twist:
         max_linear = float(self.get_parameter('max_linear_speed').value)
         max_angular = float(self.get_parameter('max_angular_speed').value)
-        center_gate = max(center_tol * 2.8, float(self.get_parameter('mpc_center_gate_ratio').value))
+        configured_gate = float(self.get_parameter('mpc_center_gate_ratio').value)
+        forward_gate = max(center_tol, float(self.get_parameter('mpc_forward_lateral_gate').value))
+        center_gate = self.clamp(configured_gate, center_tol, forward_gate)
         linear_candidates = self.mpc_candidates(max_linear)
         angular_candidates = self.mpc_candidates(max_angular)
 
@@ -872,9 +1197,18 @@ class CompetitionPickPlace(Node):
                 if now - det.stamp <= self.stale_seconds
             )
 
-    def publish_search_twist(self, period: Optional[float] = None) -> None:
+    def publish_search_twist(
+        self,
+        period: Optional[float] = None,
+        last_center_error: Optional[float] = None,
+    ) -> None:
         twist = Twist()
-        twist.angular.z = float(self.get_parameter('search_angular_speed').value)
+        search_speed = float(self.get_parameter('search_angular_speed').value)
+        if last_center_error is not None and abs(last_center_error) > 1e-6:
+            target_side = 1.0 if last_center_error > 0.0 else -1.0
+            twist.angular.z = float(self.get_parameter('angular_sign').value) * abs(search_speed) * target_side
+        else:
+            twist.angular.z = search_speed
         self.publish_control_pulse(twist, self.visual_servo_period_seconds() if period is None else period)
 
     def run_pick_controller(self, target_names: Iterable[str], label: str) -> None:
@@ -989,6 +1323,22 @@ class CompetitionPickPlace(Node):
             result.append(index)
         return result
 
+    def resolve_place_steps(self) -> List[int]:
+        explicit_steps = self.parse_step_indices(self.get_parameter('place_steps').value)
+        if explicit_steps:
+            return explicit_steps
+
+        if bool(self.get_parameter('hold_after_place').value):
+            hold_steps = self.parse_step_indices(self.get_parameter('hold_place_steps').value)
+            if hold_steps:
+                self.get_logger().info(
+                    f'hold_after_place=true: using partial place steps {list(hold_steps)} '
+                    'to keep the gripper closed after placement'
+                )
+                return hold_steps
+
+        return []
+
     def grasp_succeeded(self, label: str) -> bool:
         if not bool(self.get_parameter('grasp_check_enabled').value):
             self.get_logger().info(f'{label}: grasp check disabled; assuming success')
@@ -1031,6 +1381,33 @@ class CompetitionPickPlace(Node):
             f'{label}: no fresh gripper feedback within {timeout:.1f}s; assuming success to avoid unsafe retry'
         )
         return True
+
+    def open_gripper_for_approach(self, label: str) -> None:
+        if not self.use_arm:
+            self.get_logger().warn(f'use_arm=false: skip opening gripper for {label}')
+            return
+        if self.dry_run:
+            self.get_logger().info(f'dry-run open gripper for {label}')
+            return
+        if ServosPosition is None:
+            raise RuntimeError('servo_controller_msgs is not available')
+        if self.arm_controller is None:
+            raise RuntimeError('arm controller is not initialized')
+
+        gripper_id = int(self.get_parameter('gripper_servo_id').value)
+        open_position = float(self.get_parameter('gripper_open_position').value)
+        duration = max(0.05, float(self.get_parameter('gripper_open_duration').value))
+        msg = ServosPosition()
+        msg.position_unit = 'pulse'
+        msg.duration = duration
+        msg.position = [self.make_servo_position(gripper_id, open_position)]
+        self.stop_robot()
+        self.get_logger().info(
+            f'open gripper before approach {label}: gripper_id={gripper_id}, '
+            f'position={open_position:.0f}, duration={duration:.2f}s'
+        )
+        self.arm_controller.servo_controller_pub.publish(msg)
+        time.sleep(duration)
 
     def run_action_group_steps(self, action_name: str, step_indices: Sequence[int], label: str) -> None:
         if not step_indices:
@@ -1186,7 +1563,6 @@ class CompetitionPickPlace(Node):
                 time.sleep(period)
                 continue
 
-            center_error = det.cx_ratio - desired_center
             if self.should_wait_for_fresh_detection(det, last_control_seq):
                 self.stop_robot()
                 time.sleep(period)
@@ -1200,26 +1576,56 @@ class CompetitionPickPlace(Node):
                 target_depth=target_depth,
                 depth_tolerance=depth_tolerance,
             )
-            if area_tolerance is not None and abs(center_error) <= center_tolerance and distance.aligned:
+            if bool(self.get_parameter('use_robot_frame_distance').value) and distance.source != 'robot_frame':
                 self.stop_robot()
                 if now - last_log > 0.45:
-                    self.get_logger().info(
-                        f'visual-servo {label}: holding alignment class={det.class_name} '
-                        f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f} '
-                        f'distance_source={distance.source} value={self.format_optional(distance.value)}'
+                    self.log_alignment_state(
+                        label=label,
+                        det=det,
+                        distance=distance,
+                        center_error=det.cx_ratio - desired_center,
+                        center_tolerance=center_tolerance,
+                        twist=None,
+                        prefix='visual-servo waiting robot-frame pose',
                     )
                     last_log = now
                 time.sleep(period)
                 continue
-            twist = self.compute_visual_servo_twist(center_error, distance.error, center_tolerance)
+            center_error = (
+                distance.lateral_error
+                if distance.lateral_error is not None
+                else det.cx_ratio - desired_center
+            )
+            active_center_tol = (
+                distance.lateral_tolerance
+                if distance.lateral_tolerance is not None
+                else center_tolerance
+            )
+            if area_tolerance is not None and abs(center_error) <= active_center_tol and distance.aligned:
+                self.stop_robot()
+                if now - last_log > 0.45:
+                    self.log_alignment_state(
+                        label=label,
+                        det=det,
+                        distance=distance,
+                        center_error=center_error,
+                        center_tolerance=active_center_tol,
+                        twist=None,
+                        prefix='visual-servo holding',
+                    )
+                    last_log = now
+                time.sleep(period)
+                continue
+            twist = self.compute_visual_servo_twist(distance, center_error, active_center_tol)
             if now - last_log > 0.45:
-                self.get_logger().info(
-                    f'visual-servo {label}: class={det.class_name} score={det.score:.2f} '
-                    f'cx={det.cx_ratio:.3f} area={det.area_ratio:.3f} '
-                    f'desired_cx={desired_center:.3f} distance_source={distance.source} '
-                    f'value={self.format_optional(distance.value)} target={distance.target:.3f} '
-                    f'error={distance.error:.3f} '
-                    f'cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})'
+                self.log_alignment_state(
+                    label=label,
+                    det=det,
+                    distance=distance,
+                    center_error=center_error,
+                    center_tolerance=active_center_tol,
+                    twist=twist,
+                    prefix='visual-servo',
                 )
                 last_log = now
             self.publish_control_pulse(twist, period)

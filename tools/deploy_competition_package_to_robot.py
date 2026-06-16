@@ -3,6 +3,7 @@ import argparse
 import io
 import shlex
 import tarfile
+import time
 from pathlib import Path
 
 import paramiko
@@ -40,22 +41,34 @@ def make_tar_bytes(package_dir: Path) -> bytes:
             if path.suffix in {'.pyc', '.pyo'}:
                 continue
             arcname = Path(package_dir.name) / path.relative_to(package_dir)
-            tar.add(path, arcname=str(arcname))
+            tar.add(path, arcname=str(arcname), recursive=False)
     return data.getvalue()
 
 
 def connect(args):
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(
-        args.host,
-        username=args.user,
-        password=args.password,
-        timeout=10,
-        banner_timeout=10,
-        auth_timeout=10,
-    )
-    return client
+    last_exc = None
+    for attempt in range(1, 7):
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                args.host,
+                username=args.user,
+                password=args.password,
+                timeout=15,
+                banner_timeout=20,
+                auth_timeout=15,
+            )
+            if attempt > 1:
+                print(f'ssh connected on attempt {attempt}')
+            return client
+        except Exception as exc:
+            last_exc = exc
+            client.close()
+            wait_s = min(12, 2 * attempt)
+            print(f'ssh connect attempt {attempt}/6 failed: {exc}; retrying in {wait_s}s')
+            time.sleep(wait_s)
+    raise last_exc
 
 
 def run(client, command, timeout=180):
@@ -97,6 +110,8 @@ def main():
         inner = (
             f'set -e; '
             f'rm -rf {shlex.quote(args.workspace)}/src/competition_pick_place; '
+            f'rm -rf {shlex.quote(args.workspace)}/build/competition_pick_place; '
+            f'rm -rf {shlex.quote(args.workspace)}/install/competition_pick_place; '
             f'mkdir -p {shlex.quote(args.workspace)}/src; '
             f'tar -xzf {shlex.quote(args.container_tar)} -C {shlex.quote(args.workspace)}/src; '
             f'cd {shlex.quote(args.workspace)}; '

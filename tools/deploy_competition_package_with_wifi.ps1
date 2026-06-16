@@ -12,10 +12,20 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 function Connect-WifiProfile {
     param([string]$Ssid)
-    Write-Host "Connecting WiFi profile: $Ssid"
-    netsh wlan connect name="$Ssid" ssid="$Ssid" interface="$Interface" | Out-Host
-    Start-Sleep -Seconds 8
-    netsh wlan show interfaces | Out-Host
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Write-Host "Connecting WiFi profile: $Ssid (attempt $attempt)"
+        netsh wlan disconnect interface="$Interface" | Out-Host
+        Start-Sleep -Seconds 2
+        netsh wlan connect name="$Ssid" ssid="$Ssid" interface="$Interface" | Out-Host
+        Start-Sleep -Seconds 8
+        $state = netsh wlan show interfaces
+        $state | Out-Host
+        $ssidPattern = 'SSID\s+:\s+{0}(\s|$)' -f [regex]::Escape($Ssid)
+        if ($state -match $ssidPattern) {
+            return
+        }
+    }
+    throw "Failed to connect WiFi profile: $Ssid"
 }
 
 function Wait-RobotPing {

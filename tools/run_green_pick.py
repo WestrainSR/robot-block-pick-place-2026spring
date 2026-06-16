@@ -6,12 +6,15 @@ import paramiko
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Run a real green-block pick attempt on the robot.')
+    parser = argparse.ArgumentParser(description='Run a real competition block pick attempt on the robot.')
     parser.add_argument('--host', default='192.168.149.1')
     parser.add_argument('--user', default='pi')
     parser.add_argument('--password', default='raspberrypi')
     parser.add_argument('--container', default='MentorPi')
-    parser.add_argument('--target-class', default='green', choices=['red', 'green', 'blue'])
+    parser.add_argument('--target-class', default='grass', choices=['gray', 'grey', 'yellow', 'grass', 'blue'])
+    parser.add_argument('--yolo-model', default='tongji')
+    parser.add_argument('--yolo-classes', default='gray,yellow,grass,blue')
+    parser.add_argument('--yolo-conf', type=float, default=0.70)
     parser.add_argument('--timeout', type=int, default=90)
     parser.add_argument('--center', type=float, default=0.50)
     parser.add_argument('--center-tolerance', type=float, default=0.028)
@@ -101,8 +104,9 @@ ros2 launch competition_pick_place "$LAUNCH_FILE" \\
   start_yolo:=true \\
   use_nav:=false \\
   use_arm:=true \\
-  yolo_model:=competition_blocks \\
-  yolo_conf:=0.70 \\
+  yolo_model:={shlex.quote(args.yolo_model)} \\
+  yolo_classes:={shlex.quote(args.yolo_classes)} \\
+  yolo_conf:={args.yolo_conf:.3f} \\
   init_action:={shlex.quote(args.init_action)} \\
   pick_action:={shlex.quote(args.pick_action)} \\
   search_timeout:=12.0 \\
@@ -110,16 +114,27 @@ ros2 launch competition_pick_place "$LAUNCH_FILE" \\
   wait_for_detection_stream:=true \\
   detection_stream_timeout:={args.detection_stream_timeout:.1f} \\
   detection_ready_min_messages:=1 \\
+  wait_for_target_before_search:=true \\
   use_depth_distance:={str(bool(args.use_depth_distance)).lower()} \\
   depth_topic:={shlex.quote(args.depth_topic)} \\
+  camera_info_topic:=/ascamera/camera_publisher/rgb0/camera_info \\
+  use_robot_frame_distance:=true \\
+  camera_tilt_deg:=45.0 \\
+  camera_height_m:=0.22 \\
+  camera_offset_x_m:=0.06 \\
+  depth_roi_pixels:=15 \\
   depth_stale_seconds:=0.800 \\
   depth_unit_scale:=0.001 \\
   depth_roi_scale:={args.depth_roi_scale:.3f} \\
   depth_sample_grid:=5 \\
-  depth_min_valid_samples:=3 \\
+  depth_min_valid_samples:=20 \\
   depth_min_m:=0.080 \\
   depth_max_m:=1.500 \\
   pick_target_depth_m:={args.target_depth:.3f} \\
+  pick_target_robot_x_m:={args.target_depth:.3f} \\
+  pick_target_robot_y_m:=0.0 \\
+  pick_robot_x_tolerance_m:={args.depth_tolerance:.3f} \\
+  pick_robot_y_tolerance_m:=0.025 \\
   pick_depth_tolerance_m:={args.depth_tolerance:.3f} \\
   pick_preclose_target_depth_m:=-1.0 \\
   desired_center_x_ratio:={args.center:.4f} \\

@@ -52,6 +52,10 @@ STALE_SECONDS = __STALE_SECONDS__
 COLORS = {
     "red": (40, 55, 230),
     "green": (70, 190, 95),
+    "grass": (70, 190, 95),
+    "gray": (255, 0, 255),
+    "grey": (255, 0, 255),
+    "yellow": (30, 215, 235),
     "blue": (230, 115, 60),
 }
 
@@ -98,14 +102,14 @@ class YoloOverlayStream(Node):
                 y1 = max(0, min(h - 1, y1))
                 y2 = max(0, min(h - 1, y2))
                 color = COLORS.get(det["class_name"], (0, 210, 255))
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
                 cx = ((x1 + x2) * 0.5) / max(1, w)
                 area = max(0, x2 - x1) * max(0, y2 - y1) / max(1, w * h)
                 label = f'{det["class_name"]} {det["score"]:.2f} cx={cx:.2f} area={area:.3f}'
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 1)
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.56, 2)
                 y0 = max(0, y1 - th - 8)
                 cv2.rectangle(frame, (x1, y0), (min(w - 1, x1 + tw + 8), y1), color, -1)
-                cv2.putText(frame, label, (x1 + 4, max(th + 2, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(frame, label, (x1 + 4, max(th + 2, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (255, 255, 255), 2, cv2.LINE_AA)
         else:
             cv2.putText(frame, "waiting for YOLO detections", (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 210, 255), 2, cv2.LINE_AA)
 
@@ -309,13 +313,20 @@ INDEX_HTML = r'''<!doctype html>
       <div class="params">
         <label>目标颜色
           <select id="target_class">
-            <option value="green">green</option>
-            <option value="red">red</option>
+            <option value="grass">grass</option>
+            <option value="gray">gray/grey</option>
+            <option value="yellow">yellow</option>
             <option value="blue">blue</option>
           </select>
         </label>
         <label>YOLO 置信度
-          <input id="yolo_conf" type="number" step="0.01" value="0.70">
+          <input id="yolo_conf" type="number" step="0.01" value="0.20">
+        </label>
+        <label>YOLO 模型
+          <select id="yolo_model">
+            <option value="tongji">tongji</option>
+            <option value="competition_blocks">competition_blocks</option>
+          </select>
         </label>
         <label>中心目标 cx
           <input id="center" type="number" step="0.001" value="0.50">
@@ -360,10 +371,10 @@ INDEX_HTML = r'''<!doctype html>
           <input id="gripper_delay" type="number" step="0.05" value="0.35">
         </label>
         <label>最大线速度
-          <input id="max_linear" type="number" step="0.005" value="0.035">
+          <input id="max_linear" type="number" step="0.005" value="0.09">
         </label>
         <label>最大角速度
-          <input id="max_angular" type="number" step="0.01" value="0.14">
+          <input id="max_angular" type="number" step="0.01" value="0.35">
         </label>
         <label>visual period(s)
           <input id="visual_period" type="number" step="0.01" value="0.10">
@@ -442,8 +453,11 @@ function showNotice(text, kind = 'info') {
 }
 
 function params() {
+  const yoloModel = $('yolo_model').value;
   return {
     target_class: $('target_class').value,
+    yolo_model: yoloModel,
+    yolo_classes: yoloModel === 'tongji' ? ['gray', 'yellow', 'grass', 'blue'] : ['red', 'green', 'blue'],
     yolo_conf: Number($('yolo_conf').value),
     center: Number($('center').value),
     center_tolerance: Number($('center_tolerance').value),
@@ -672,10 +686,13 @@ $('pickStart').onclick = async () => {
   showNotice('正在启动抓取：会先清理旧视觉/抓取进程...', 'info');
   streamOn = false;
   $('stream').removeAttribute('src');
-  setStreamMessage('抓取已接管相机/YOLO，实时画面暂时关闭。', 'info');
+  setStreamMessage('正在启动抓取链路，启动后会自动重新打开实时画面。', 'info');
   try {
     const data = await api('/api/start_pick', params());
     showNotice('抓取已启动：' + (data.message || ''), 'ok');
+    streamOn = true;
+    setStreamMessage('抓取已启动，正在重新连接 YOLO 实时画面...', 'info');
+    $('stream').src = '/stream.mjpg?ts=' + Date.now();
     refreshStatus({quiet: true});
   }
   catch (err) { showNotice('启动抓取失败：' + String(err.message || err), 'error'); appendLog(String(err.message || err)); }
@@ -797,7 +814,7 @@ class Robot:
 
 
 def ros_prefix() -> str:
-    return 'source /opt/ros/humble/setup.bash; source /home/ubuntu/ros2_ws/install/setup.bash; export need_compile=True; '
+    return 'source /home/ubuntu/ros2_ws/.robotrc; '
 
 
 def shell_kill_helpers() -> str:
@@ -901,7 +918,16 @@ echo "stream_processes=$(count_matching 'local_yolo_overlay_stream')"
 
 
 def start_vision(robot: Robot, params: dict) -> str:
-    yolo_conf = float(params.get('yolo_conf', 0.70))
+    yolo_conf = float(params.get('yolo_conf', 0.20))
+    yolo_model = str(params.get('yolo_model', 'tongji')).strip() or 'tongji'
+    yolo_classes = params.get('yolo_classes') or ['gray', 'yellow', 'grass', 'blue']
+    if isinstance(yolo_classes, str):
+        yolo_classes = [part.strip() for part in yolo_classes.split(',') if part.strip()]
+    yolo_classes = [str(item).strip() for item in yolo_classes if str(item).strip()]
+    if not yolo_classes:
+        yolo_classes = ['gray', 'yellow', 'grass', 'blue']
+    model_literal = repr(yolo_model)
+    classes_literal = repr(yolo_classes)
     script = ros_prefix() + shell_kill_helpers() + camera_helpers() + f'''
 set +e
 reset_ui_processes
@@ -922,8 +948,8 @@ launch_service.include_launch_description(
             name='yolo_node',
             output='screen',
             parameters=[
-                {{'classes': ['red', 'green', 'blue']}},
-                {{'model': 'competition_blocks', 'conf': {yolo_conf:.3f}, 'start': True}},
+                {{'classes': {classes_literal}}},
+                {{'model': {model_literal}, 'conf': {yolo_conf:.3f}, 'start': True}},
             ],
         )
     ])
@@ -964,8 +990,14 @@ echo "stream_processes=$(count_matching 'local_yolo_overlay_stream')"
 
 
 def start_pick(robot: Robot, params: dict) -> str:
-    target = shlex.quote(str(params.get('target_class', 'green')))
+    target = shlex.quote(str(params.get('target_class', 'grass')))
     control_mode = shlex.quote(str(params.get('control_mode', 'mpc')))
+    yolo_model = shlex.quote(str(params.get('yolo_model', 'tongji')).strip() or 'tongji')
+    yolo_classes = params.get('yolo_classes') or ['gray', 'yellow', 'grass', 'blue']
+    if isinstance(yolo_classes, str):
+        yolo_classes = [part.strip() for part in yolo_classes.split(',') if part.strip()]
+    yolo_classes = [str(item).strip() for item in yolo_classes if str(item).strip()] or ['gray', 'yellow', 'grass', 'blue']
+    yolo_classes_arg = shlex.quote(','.join(yolo_classes))
     center = float(params.get('center', 0.50))
     center_tol = float(params.get('center_tolerance', 0.028))
     target_area = float(params.get('target_area', 0.043))
@@ -979,8 +1011,8 @@ def start_pick(robot: Robot, params: dict) -> str:
     gripper_gap = max(0, int(params.get('gripper_gap', 30)))
     empty_close = int(params.get('empty_close', 500))
     gripper_delay = float(params.get('gripper_delay', 0.35))
-    max_linear = float(params.get('max_linear', 0.035))
-    max_angular = float(params.get('max_angular', 0.14))
+    max_linear = float(params.get('max_linear', 0.09))
+    max_angular = float(params.get('max_angular', 0.35))
     visual_period = float(params.get('visual_period', 0.10))
     cmd_pulse = float(params.get('cmd_pulse', 0.04))
     adaptive_timing = str(bool(params.get('adaptive_timing', True))).lower()
@@ -1008,8 +1040,10 @@ nohup ros2 launch competition_pick_place competition_run.launch.py \\
   start_yolo:=true \\
   use_nav:=false \\
   use_arm:=true \\
-  yolo_model:=competition_blocks \\
-  yolo_conf:={float(params.get('yolo_conf', 0.70)):.3f} \\
+  yolo_model:={yolo_model} \\
+  yolo_classes:={yolo_classes_arg} \\
+  yolo_conf:={float(params.get('yolo_conf', 0.20)):.3f} \\
+  min_score:={float(params.get('yolo_conf', 0.20)):.3f} \\
   init_action:=navigation_pick_init_ai \\
   pick_action:=navigation_pick_ai \\
   search_timeout:=12.0 \\
@@ -1017,16 +1051,27 @@ nohup ros2 launch competition_pick_place competition_run.launch.py \\
   wait_for_detection_stream:=true \\
   detection_stream_timeout:=20.0 \\
   detection_ready_min_messages:=1 \\
+  wait_for_target_before_search:=true \\
   use_depth_distance:={use_depth} \\
   depth_topic:={depth_topic} \\
+  camera_info_topic:=/ascamera/camera_publisher/rgb0/camera_info \\
+  use_robot_frame_distance:=true \\
+  camera_tilt_deg:=45.0 \\
+  camera_height_m:=0.22 \\
+  camera_offset_x_m:=0.06 \\
+  depth_roi_pixels:=15 \\
   depth_stale_seconds:=0.800 \\
   depth_unit_scale:=0.001 \\
   depth_roi_scale:={depth_roi:.3f} \\
   depth_sample_grid:=5 \\
-  depth_min_valid_samples:=3 \\
+  depth_min_valid_samples:=20 \\
   depth_min_m:=0.080 \\
   depth_max_m:=1.500 \\
   pick_target_depth_m:={target_depth:.3f} \\
+  pick_target_robot_x_m:={target_depth:.3f} \\
+  pick_target_robot_y_m:=0.0 \\
+  pick_robot_x_tolerance_m:={depth_tolerance:.3f} \\
+  pick_robot_y_tolerance_m:=0.025 \\
   pick_depth_tolerance_m:={depth_tolerance:.3f} \\
   pick_preclose_target_depth_m:=-1.0 \\
   desired_center_x_ratio:={center:.4f} \\
@@ -1065,6 +1110,7 @@ nohup ros2 launch competition_pick_place competition_run.launch.py \\
   gripper_check_delay:={gripper_delay:.3f} \\
   gripper_feedback_timeout:=2.0 \\
   angular_k:=0.80 \\
+  angular_sign:=-1.0 \\
   max_linear_speed:={max_linear:.4f} \\
   max_angular_speed:={max_angular:.4f} \\
   search_angular_speed:=0.12 \\
@@ -1218,7 +1264,15 @@ def make_stream_script(fps: int = 8, quality: int = 78) -> str:
     script = script.replace('__FPS__', str(fps))
     script = script.replace('__JPEG_QUALITY__', str(quality))
     script = script.replace('__STALE_SECONDS__', '0.8')
-    return ros_prefix() + 'python3 -u - <<\'PY\'\n' + script + '\nPY\n'
+    return (
+        ros_prefix()
+        + shell_kill_helpers()
+        + camera_helpers()
+        + 'ensure_camera || exit 20\n'
+        + 'python3 -u - <<\'PY\'\n'
+        + script
+        + '\nPY\n'
+    )
 
 
 class Handler(BaseHTTPRequestHandler):

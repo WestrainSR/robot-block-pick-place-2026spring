@@ -22,6 +22,9 @@ def parse_args():
     parser.add_argument('--password', default=DEFAULT_PASSWORD)
     parser.add_argument('--container', default=DEFAULT_CONTAINER)
     parser.add_argument('--local-dir', default=DEFAULT_LOCAL_DIR)
+    parser.add_argument('--model-name', default='competition_blocks')
+    parser.add_argument('--xml', default='', help='Optional explicit local .xml path.')
+    parser.add_argument('--bin', default='', help='Optional explicit local .bin path.')
     parser.add_argument('--remote-stage', default=DEFAULT_REMOTE_STAGE)
     parser.add_argument('--container-models', default=DEFAULT_CONTAINER_MODELS)
     parser.add_argument('--skip-container-copy', action='store_true')
@@ -69,39 +72,42 @@ def sftp_put(client, local_path, remote_path):
 def main():
     args = parse_args()
     local_dir = Path(args.local_dir)
-    xml = local_dir / 'competition_blocks.xml'
-    bin_file = local_dir / 'competition_blocks.bin'
+    model_name = args.model_name.strip() or 'competition_blocks'
+    xml = Path(args.xml) if args.xml else local_dir / f'{model_name}.xml'
+    bin_file = Path(args.bin) if args.bin else local_dir / f'{model_name}.bin'
     if not xml.exists() or not bin_file.exists():
-        raise SystemExit(f'missing OpenVINO model files in {local_dir}')
+        raise SystemExit(f'missing OpenVINO model files: {xml} / {bin_file}')
 
     client = connect(args)
     try:
         run(client, f'mkdir -p {shlex.quote(args.remote_stage)}')
-        sftp_put(client, xml, f'{args.remote_stage}/competition_blocks.xml')
-        sftp_put(client, bin_file, f'{args.remote_stage}/competition_blocks.bin')
+        remote_xml = f'{args.remote_stage}/{model_name}.xml'
+        remote_bin = f'{args.remote_stage}/{model_name}.bin'
+        sftp_put(client, xml, remote_xml)
+        sftp_put(client, bin_file, remote_bin)
 
         if not args.skip_container_copy:
             run(client, f'docker ps --format "{{{{.Names}}}}" | grep -Fx {shlex.quote(args.container)}')
             run(client, f'docker exec -u ubuntu {shlex.quote(args.container)} mkdir -p {shlex.quote(args.container_models)}')
             run(
                 client,
-                f'docker cp {shlex.quote(args.remote_stage)}/competition_blocks.xml '
-                f'{shlex.quote(args.container)}:{shlex.quote(args.container_models)}/competition_blocks.xml',
+                f'docker cp {shlex.quote(remote_xml)} '
+                f'{shlex.quote(args.container)}:{shlex.quote(args.container_models)}/{model_name}.xml',
             )
             run(
                 client,
-                f'docker cp {shlex.quote(args.remote_stage)}/competition_blocks.bin '
-                f'{shlex.quote(args.container)}:{shlex.quote(args.container_models)}/competition_blocks.bin',
+                f'docker cp {shlex.quote(remote_bin)} '
+                f'{shlex.quote(args.container)}:{shlex.quote(args.container_models)}/{model_name}.bin',
             )
             run(
                 client,
                 f'docker exec -u ubuntu {shlex.quote(args.container)} bash -lc '
                 + shlex.quote(
-                    f'ls -lh {shlex.quote(args.container_models)}/competition_blocks.* '
+                    f'ls -lh {shlex.quote(args.container_models)}/{model_name}.* '
                     f'&& python3 - <<PY\n'
                     f'from pathlib import Path\n'
                     f'p=Path("{args.container_models}")\n'
-                    f'print((p/"competition_blocks.xml").exists(), (p/"competition_blocks.bin").exists())\n'
+                    f'print((p/"{model_name}.xml").exists(), (p/"{model_name}.bin").exists())\n'
                     f'PY'
                 ),
             )

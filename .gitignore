@@ -33,6 +33,7 @@ datasets/
 runs/
 reports/
 deployment/competition_blocks_openvino/
+model/
 *_openvino_model/
 *.pt
 *.onnx
@@ -43,6 +44,7 @@ deployment/competition_blocks_openvino/
 *.pid
 *.tmp
 *.bak
+*_extracted_text.txt
 *.db3
 *.sqlite
 *.sqlite3
@@ -56,5 +58,6 @@ rosbag2_*/
 .vscode/
 .idea/
 node_modules/
+~$*
 Thumbs.db
 .DS_Store
