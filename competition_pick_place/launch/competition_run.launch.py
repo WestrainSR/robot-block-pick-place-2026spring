@@ -31,16 +31,41 @@ def launch_setup(context):
     target_sequence = LaunchConfiguration('target_sequence')
     target_aliases = LaunchConfiguration('target_aliases')
     place_class = LaunchConfiguration('place_class')
+    feed_waypoint = LaunchConfiguration('feed_waypoint')
+    post_feed_return_waypoint = LaunchConfiguration('post_feed_return_waypoint')
+    post_pick_advance_m = LaunchConfiguration('post_pick_advance_m')
+    post_pick_advance_speed = LaunchConfiguration('post_pick_advance_speed')
     dry_run = LaunchConfiguration('dry_run')
     exit_on_done = LaunchConfiguration('exit_on_done')
     stop_after_pick = LaunchConfiguration('stop_after_pick')
     use_nav = LaunchConfiguration('use_nav')
     use_arm = LaunchConfiguration('use_arm')
+    nav_mode = LaunchConfiguration('nav_mode')
     map_name = LaunchConfiguration('map_name')
     start_navigation = LaunchConfiguration('start_navigation')
     start_base = LaunchConfiguration('start_base')
     start_camera = LaunchConfiguration('start_camera')
     start_yolo = LaunchConfiguration('start_yolo')
+    odom_topic = LaunchConfiguration('odom_topic')
+    odom_stale_seconds = LaunchConfiguration('odom_stale_seconds')
+    odom_wait_timeout = LaunchConfiguration('odom_wait_timeout')
+    odom_goal_tolerance_m = LaunchConfiguration('odom_goal_tolerance_m')
+    odom_yaw_tolerance_rad = LaunchConfiguration('odom_yaw_tolerance_rad')
+    odom_control_period = LaunchConfiguration('odom_control_period')
+    odom_linear_k = LaunchConfiguration('odom_linear_k')
+    odom_angular_k = LaunchConfiguration('odom_angular_k')
+    odom_max_linear_speed = LaunchConfiguration('odom_max_linear_speed')
+    odom_max_angular_speed = LaunchConfiguration('odom_max_angular_speed')
+    post_pick_advance_use_odom = LaunchConfiguration('post_pick_advance_use_odom')
+    odom_material_x = LaunchConfiguration('odom_material_x')
+    odom_material_y = LaunchConfiguration('odom_material_y')
+    odom_material_yaw = LaunchConfiguration('odom_material_yaw')
+    odom_feed_x = LaunchConfiguration('odom_feed_x')
+    odom_feed_y = LaunchConfiguration('odom_feed_y')
+    odom_feed_yaw = LaunchConfiguration('odom_feed_yaw')
+    odom_return_x = LaunchConfiguration('odom_return_x')
+    odom_return_y = LaunchConfiguration('odom_return_y')
+    odom_return_yaw = LaunchConfiguration('odom_return_yaw')
     yolo_model = LaunchConfiguration('yolo_model')
     yolo_classes = _csv_list(
         LaunchConfiguration('yolo_classes').perform(context),
@@ -122,6 +147,27 @@ def launch_setup(context):
     place_steps = LaunchConfiguration('place_steps')
     hold_after_place = LaunchConfiguration('hold_after_place')
     hold_place_steps = LaunchConfiguration('hold_place_steps')
+    l_shape_push_enabled = LaunchConfiguration('l_shape_push_enabled')
+    l_shape_push_pose = LaunchConfiguration('l_shape_push_pose')
+    l_shape_push_pose_action = LaunchConfiguration('l_shape_push_pose_action')
+    l_shape_push_pose_step = LaunchConfiguration('l_shape_push_pose_step')
+    l_shape_push_pose_duration = LaunchConfiguration('l_shape_push_pose_duration')
+    l_shape_push_wrist_servo_index = LaunchConfiguration('l_shape_push_wrist_servo_index')
+    l_shape_push_wrist_position = LaunchConfiguration('l_shape_push_wrist_position')
+    l_shape_push_gripper_position = LaunchConfiguration('l_shape_push_gripper_position')
+    l_shape_push_distance_m = LaunchConfiguration('l_shape_push_distance_m')
+    l_shape_push_speed_mps = LaunchConfiguration('l_shape_push_speed_mps')
+    l_shape_push_max_seconds = LaunchConfiguration('l_shape_push_max_seconds')
+    l_shape_push_release_before = LaunchConfiguration('l_shape_push_release_before')
+    l_shape_push_close_after = LaunchConfiguration('l_shape_push_close_after')
+    l_shape_push_close_position = LaunchConfiguration('l_shape_push_close_position')
+    l_shape_push_close_duration = LaunchConfiguration('l_shape_push_close_duration')
+    l_shape_push_lift_action = LaunchConfiguration('l_shape_push_lift_action')
+    l_shape_push_lift_steps = LaunchConfiguration('l_shape_push_lift_steps')
+    release_action = LaunchConfiguration('release_action')
+    release_gripper_position = LaunchConfiguration('release_gripper_position')
+    release_gripper_duration = LaunchConfiguration('release_gripper_duration')
+    release_settle_seconds = LaunchConfiguration('release_settle_seconds')
     pick_retry_attempts = LaunchConfiguration('pick_retry_attempts')
     grasp_check_enabled = LaunchConfiguration('grasp_check_enabled')
     gripper_state_topic = LaunchConfiguration('gripper_state_topic')
@@ -187,12 +233,37 @@ def launch_setup(context):
                 'target_sequence': target_sequence,
                 'target_aliases': target_aliases,
                 'place_class': place_class,
+                'feed_waypoint': feed_waypoint,
+                'post_feed_return_waypoint': post_feed_return_waypoint,
+                'post_pick_advance_m': ParameterValue(post_pick_advance_m, value_type=float),
+                'post_pick_advance_speed': ParameterValue(post_pick_advance_speed, value_type=float),
                 'dry_run': ParameterValue(dry_run, value_type=bool),
                 'min_score': ParameterValue(min_score, value_type=float),
                 'exit_on_done': ParameterValue(exit_on_done, value_type=bool),
                 'stop_after_pick': ParameterValue(stop_after_pick, value_type=bool),
                 'use_nav': ParameterValue(use_nav, value_type=bool),
                 'use_arm': ParameterValue(use_arm, value_type=bool),
+                'nav_mode': nav_mode,
+                'odom_topic': odom_topic,
+                'odom_stale_seconds': ParameterValue(odom_stale_seconds, value_type=float),
+                'odom_wait_timeout': ParameterValue(odom_wait_timeout, value_type=float),
+                'odom_goal_tolerance_m': ParameterValue(odom_goal_tolerance_m, value_type=float),
+                'odom_yaw_tolerance_rad': ParameterValue(odom_yaw_tolerance_rad, value_type=float),
+                'odom_control_period': ParameterValue(odom_control_period, value_type=float),
+                'odom_linear_k': ParameterValue(odom_linear_k, value_type=float),
+                'odom_angular_k': ParameterValue(odom_angular_k, value_type=float),
+                'odom_max_linear_speed': ParameterValue(odom_max_linear_speed, value_type=float),
+                'odom_max_angular_speed': ParameterValue(odom_max_angular_speed, value_type=float),
+                'post_pick_advance_use_odom': ParameterValue(post_pick_advance_use_odom, value_type=bool),
+                'odom_material_x': ParameterValue(odom_material_x, value_type=float),
+                'odom_material_y': ParameterValue(odom_material_y, value_type=float),
+                'odom_material_yaw': ParameterValue(odom_material_yaw, value_type=float),
+                'odom_feed_x': ParameterValue(odom_feed_x, value_type=float),
+                'odom_feed_y': ParameterValue(odom_feed_y, value_type=float),
+                'odom_feed_yaw': ParameterValue(odom_feed_yaw, value_type=float),
+                'odom_return_x': ParameterValue(odom_return_x, value_type=float),
+                'odom_return_y': ParameterValue(odom_return_y, value_type=float),
+                'odom_return_yaw': ParameterValue(odom_return_yaw, value_type=float),
                 'waypoints_yaml': waypoints_yaml,
                 'init_action': init_action,
                 'pick_action': pick_action,
@@ -267,6 +338,27 @@ def launch_setup(context):
                 'place_steps': place_steps,
                 'hold_after_place': ParameterValue(hold_after_place, value_type=bool),
                 'hold_place_steps': hold_place_steps,
+                'l_shape_push_enabled': ParameterValue(l_shape_push_enabled, value_type=bool),
+                'l_shape_push_pose': l_shape_push_pose,
+                'l_shape_push_pose_action': l_shape_push_pose_action,
+                'l_shape_push_pose_step': ParameterValue(l_shape_push_pose_step, value_type=int),
+                'l_shape_push_pose_duration': ParameterValue(l_shape_push_pose_duration, value_type=float),
+                'l_shape_push_wrist_servo_index': ParameterValue(l_shape_push_wrist_servo_index, value_type=int),
+                'l_shape_push_wrist_position': ParameterValue(l_shape_push_wrist_position, value_type=int),
+                'l_shape_push_gripper_position': ParameterValue(l_shape_push_gripper_position, value_type=int),
+                'l_shape_push_distance_m': ParameterValue(l_shape_push_distance_m, value_type=float),
+                'l_shape_push_speed_mps': ParameterValue(l_shape_push_speed_mps, value_type=float),
+                'l_shape_push_max_seconds': ParameterValue(l_shape_push_max_seconds, value_type=float),
+                'l_shape_push_release_before': ParameterValue(l_shape_push_release_before, value_type=bool),
+                'l_shape_push_close_after': ParameterValue(l_shape_push_close_after, value_type=bool),
+                'l_shape_push_close_position': ParameterValue(l_shape_push_close_position, value_type=int),
+                'l_shape_push_close_duration': ParameterValue(l_shape_push_close_duration, value_type=float),
+                'l_shape_push_lift_action': l_shape_push_lift_action,
+                'l_shape_push_lift_steps': l_shape_push_lift_steps,
+                'release_action': release_action,
+                'release_gripper_position': ParameterValue(release_gripper_position, value_type=int),
+                'release_gripper_duration': ParameterValue(release_gripper_duration, value_type=float),
+                'release_settle_seconds': ParameterValue(release_settle_seconds, value_type=float),
                 'pick_retry_attempts': ParameterValue(pick_retry_attempts, value_type=int),
                 'grasp_check_enabled': ParameterValue(grasp_check_enabled, value_type=bool),
                 'gripper_state_topic': gripper_state_topic,
@@ -311,20 +403,45 @@ def generate_launch_description():
         'competition_waypoints.yaml',
     )
     return LaunchDescription([
-        DeclareLaunchArgument('target_class', default_value='grass'),
+        DeclareLaunchArgument('target_class', default_value='gray'),
         DeclareLaunchArgument('target_sequence', default_value=''),
         DeclareLaunchArgument('target_aliases', default_value=''),
-        DeclareLaunchArgument('place_class', default_value=''),
+        DeclareLaunchArgument('place_class', default_value='glass'),
+        DeclareLaunchArgument('feed_waypoint', default_value='feed_pose'),
+        DeclareLaunchArgument('post_feed_return_waypoint', default_value='material_standoff_pose'),
+        DeclareLaunchArgument('post_pick_advance_m', default_value='0.20'),
+        DeclareLaunchArgument('post_pick_advance_speed', default_value='0.08'),
         DeclareLaunchArgument('dry_run', default_value='true'),
         DeclareLaunchArgument('exit_on_done', default_value='false'),
         DeclareLaunchArgument('stop_after_pick', default_value='false'),
         DeclareLaunchArgument('use_nav', default_value='true'),
         DeclareLaunchArgument('use_arm', default_value='true'),
-        DeclareLaunchArgument('map_name', default_value='competition_map'),
+        DeclareLaunchArgument('nav_mode', default_value='odom'),
+        DeclareLaunchArgument('map_name', default_value='map_02'),
         DeclareLaunchArgument('start_navigation', default_value='false'),
         DeclareLaunchArgument('start_base', default_value='false'),
         DeclareLaunchArgument('start_camera', default_value='false'),
         DeclareLaunchArgument('start_yolo', default_value='false'),
+        DeclareLaunchArgument('odom_topic', default_value='/odom'),
+        DeclareLaunchArgument('odom_stale_seconds', default_value='0.60'),
+        DeclareLaunchArgument('odom_wait_timeout', default_value='10.0'),
+        DeclareLaunchArgument('odom_goal_tolerance_m', default_value='0.045'),
+        DeclareLaunchArgument('odom_yaw_tolerance_rad', default_value='0.10'),
+        DeclareLaunchArgument('odom_control_period', default_value='0.05'),
+        DeclareLaunchArgument('odom_linear_k', default_value='0.75'),
+        DeclareLaunchArgument('odom_angular_k', default_value='1.60'),
+        DeclareLaunchArgument('odom_max_linear_speed', default_value='0.16'),
+        DeclareLaunchArgument('odom_max_angular_speed', default_value='0.45'),
+        DeclareLaunchArgument('post_pick_advance_use_odom', default_value='true'),
+        DeclareLaunchArgument('odom_material_x', default_value='1.03'),
+        DeclareLaunchArgument('odom_material_y', default_value='-1.03'),
+        DeclareLaunchArgument('odom_material_yaw', default_value='-0.7853981633974483'),
+        DeclareLaunchArgument('odom_feed_x', default_value='0.15'),
+        DeclareLaunchArgument('odom_feed_y', default_value='-1.07'),
+        DeclareLaunchArgument('odom_feed_yaw', default_value='3.141592653589793'),
+        DeclareLaunchArgument('odom_return_x', default_value='1.03'),
+        DeclareLaunchArgument('odom_return_y', default_value='-1.03'),
+        DeclareLaunchArgument('odom_return_yaw', default_value='-0.7853981633974483'),
         DeclareLaunchArgument('yolo_model', default_value='tongji'),
         DeclareLaunchArgument('yolo_classes', default_value='gray,yellow,grass,blue'),
         DeclareLaunchArgument('yolo_conf', default_value='0.20'),
@@ -403,6 +520,27 @@ def generate_launch_description():
         DeclareLaunchArgument('place_steps', default_value=''),
         DeclareLaunchArgument('hold_after_place', default_value='true'),
         DeclareLaunchArgument('hold_place_steps', default_value='1,2'),
+        DeclareLaunchArgument('l_shape_push_enabled', default_value='false'),
+        DeclareLaunchArgument('l_shape_push_pose', default_value='518,196,176,597,500,335'),
+        DeclareLaunchArgument('l_shape_push_pose_action', default_value='horizontal'),
+        DeclareLaunchArgument('l_shape_push_pose_step', default_value='1'),
+        DeclareLaunchArgument('l_shape_push_pose_duration', default_value='1.0'),
+        DeclareLaunchArgument('l_shape_push_wrist_servo_index', default_value='4'),
+        DeclareLaunchArgument('l_shape_push_wrist_position', default_value='108'),
+        DeclareLaunchArgument('l_shape_push_gripper_position', default_value='-1'),
+        DeclareLaunchArgument('l_shape_push_distance_m', default_value='0.05'),
+        DeclareLaunchArgument('l_shape_push_speed_mps', default_value='0.04'),
+        DeclareLaunchArgument('l_shape_push_max_seconds', default_value='2.0'),
+        DeclareLaunchArgument('l_shape_push_release_before', default_value='false'),
+        DeclareLaunchArgument('l_shape_push_close_after', default_value='true'),
+        DeclareLaunchArgument('l_shape_push_close_position', default_value='500'),
+        DeclareLaunchArgument('l_shape_push_close_duration', default_value='0.35'),
+        DeclareLaunchArgument('l_shape_push_lift_action', default_value='navigation_pick'),
+        DeclareLaunchArgument('l_shape_push_lift_steps', default_value='5,6'),
+        DeclareLaunchArgument('release_action', default_value=''),
+        DeclareLaunchArgument('release_gripper_position', default_value='200'),
+        DeclareLaunchArgument('release_gripper_duration', default_value='0.35'),
+        DeclareLaunchArgument('release_settle_seconds', default_value='0.30'),
         DeclareLaunchArgument('pick_retry_attempts', default_value='3'),
         DeclareLaunchArgument('grasp_check_enabled', default_value='true'),
         DeclareLaunchArgument('gripper_state_topic', default_value='/controller_manager/servo_states'),

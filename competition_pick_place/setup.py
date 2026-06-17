@@ -26,6 +26,10 @@ setup(
         'console_scripts': [
             'competition_node = competition_pick_place.competition_node:main',
             'capture_dataset = competition_pick_place.capture_dataset:main',
+            'action_group_runner = competition_pick_place.action_group_runner:main',
+            'open_loop_drive = competition_pick_place.open_loop_drive:main',
+            'place_target_align = competition_pick_place.place_target_align:main',
+            'delivery_agent = competition_pick_place.delivery_agent:main',
         ],
     },
 )

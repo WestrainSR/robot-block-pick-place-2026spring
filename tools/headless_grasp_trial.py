@@ -44,9 +44,32 @@ def parse_args():
     parser.add_argument('--place-target-robot-y', type=float, default=0.0)
     parser.add_argument('--place-robot-x-tolerance', type=float, default=0.015)
     parser.add_argument('--place-robot-y-tolerance', type=float, default=0.015)
+    parser.add_argument('--place-blind-forward-enabled', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--place-blind-forward-distance', type=float, default=0.02)
+    parser.add_argument('--place-blind-forward-speed', type=float, default=0.04)
+    parser.add_argument('--place-blind-forward-max-seconds', type=float, default=1.0)
     parser.add_argument('--place-steps', default='')
     parser.add_argument('--hold-after-place', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--hold-place-steps', default='1,2')
+    parser.add_argument('--hold-place-steps', default='')
+    parser.add_argument('--place-use-pick-geometry', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--place-pick-steps', default='1,2')
+    parser.add_argument('--l-shape-push-enabled', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--l-shape-push-pose', default='518,196,176,597,500,335')
+    parser.add_argument('--l-shape-push-pose-action', default='horizontal')
+    parser.add_argument('--l-shape-push-pose-step', type=int, default=1)
+    parser.add_argument('--l-shape-push-pose-duration', type=float, default=1.0)
+    parser.add_argument('--l-shape-push-wrist-servo-index', type=int, default=4)
+    parser.add_argument('--l-shape-push-wrist-position', type=int, default=108)
+    parser.add_argument('--l-shape-push-gripper-position', type=int, default=-1)
+    parser.add_argument('--l-shape-push-distance', type=float, default=0.05)
+    parser.add_argument('--l-shape-push-speed', type=float, default=0.04)
+    parser.add_argument('--l-shape-push-max-seconds', type=float, default=2.0)
+    parser.add_argument('--l-shape-push-release-before', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--l-shape-push-close-after', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--l-shape-push-close-position', type=int, default=500)
+    parser.add_argument('--l-shape-push-close-duration', type=float, default=0.35)
+    parser.add_argument('--l-shape-push-lift-action', default='navigation_pick_ai')
+    parser.add_argument('--l-shape-push-lift-steps', default='5,6')
     parser.add_argument('--grasp-check-enabled', action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument('--open-gripper-before-approach', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--gripper-open-position', type=int, default=200)
@@ -348,7 +371,20 @@ def q(value) -> str:
     return shlex.quote(str(value))
 
 
+def launch_arg(name: str, value) -> str:
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    return f'  {name}:={q(text)} {chr(92)}\n'
+
+
 def remote_script(args, remote_dir: str, remote_tar: str) -> str:
+    place_class_arg = launch_arg('place_class', args.place_class)
+    place_steps_arg = launch_arg('place_steps', args.place_steps)
+    hold_place_steps_arg = launch_arg('hold_place_steps', args.hold_place_steps)
+    place_pick_steps_arg = launch_arg('place_pick_steps', args.place_pick_steps)
+    l_shape_push_pose_arg = launch_arg('l_shape_push_pose', args.l_shape_push_pose)
+    l_shape_push_lift_steps_arg = launch_arg('l_shape_push_lift_steps', args.l_shape_push_lift_steps)
     return f'''
 set +e
 source /home/ubuntu/ros2_ws/.robotrc
@@ -439,8 +475,7 @@ echo recorder_pid=$REC_PID | tee -a "$DEBUG_DIR/session.log"
 
 ros2 launch competition_pick_place competition_run.launch.py \\
   target_class:={q(args.target_class)} \\
-  place_class:={q(args.place_class)} \\
-  dry_run:=false \\
+{place_class_arg}  dry_run:=false \\
   stop_after_pick:={'false' if args.place_class else 'true'} \\
   exit_on_done:=true \\
   start_navigation:=false \\
@@ -487,6 +522,10 @@ ros2 launch competition_pick_place competition_run.launch.py \\
   place_target_robot_y_m:={args.place_target_robot_y:.3f} \\
   place_robot_x_tolerance_m:={args.place_robot_x_tolerance:.3f} \\
   place_robot_y_tolerance_m:={args.place_robot_y_tolerance:.3f} \\
+  place_blind_forward_enabled:={'true' if args.place_blind_forward_enabled else 'false'} \\
+  place_blind_forward_distance_m:={args.place_blind_forward_distance:.3f} \\
+  place_blind_forward_speed_mps:={args.place_blind_forward_speed:.3f} \\
+  place_blind_forward_max_seconds:={args.place_blind_forward_max_seconds:.3f} \\
   pick_depth_tolerance_m:={args.depth_tolerance:.3f} \\
   pick_preclose_target_depth_m:=-1.0 \\
   desired_center_x_ratio:={args.center:.4f} \\
@@ -512,10 +551,24 @@ ros2 launch competition_pick_place competition_run.launch.py \\
   pick_pregrasp_post_step_seconds:={args.settle_after:.3f} \\
   pick_preclose_required:=false \\
   pick_retry_attempts:={int(args.pick_attempts)} \\
-  place_steps:={q(args.place_steps)} \\
   hold_after_place:={'true' if args.hold_after_place else 'false'} \\
-  hold_place_steps:={q(args.hold_place_steps)} \\
-  grasp_check_enabled:={'true' if args.grasp_check_enabled else 'false'} \\
+  place_use_pick_geometry:={'true' if args.place_use_pick_geometry else 'false'} \\
+{place_steps_arg}{hold_place_steps_arg}{place_pick_steps_arg}  l_shape_push_enabled:={'true' if args.l_shape_push_enabled else 'false'} \\
+{l_shape_push_pose_arg}  l_shape_push_pose_action:={q(args.l_shape_push_pose_action)} \\
+  l_shape_push_pose_step:={int(args.l_shape_push_pose_step)} \\
+  l_shape_push_pose_duration:={args.l_shape_push_pose_duration:.3f} \\
+  l_shape_push_wrist_servo_index:={int(args.l_shape_push_wrist_servo_index)} \\
+  l_shape_push_wrist_position:={int(args.l_shape_push_wrist_position)} \\
+  l_shape_push_gripper_position:={int(args.l_shape_push_gripper_position)} \\
+  l_shape_push_distance_m:={args.l_shape_push_distance:.3f} \\
+  l_shape_push_speed_mps:={args.l_shape_push_speed:.3f} \\
+  l_shape_push_max_seconds:={args.l_shape_push_max_seconds:.3f} \\
+  l_shape_push_release_before:={'true' if args.l_shape_push_release_before else 'false'} \\
+  l_shape_push_close_after:={'true' if args.l_shape_push_close_after else 'false'} \\
+  l_shape_push_close_position:={int(args.l_shape_push_close_position)} \\
+  l_shape_push_close_duration:={args.l_shape_push_close_duration:.3f} \\
+  l_shape_push_lift_action:={q(args.l_shape_push_lift_action)} \\
+{l_shape_push_lift_steps_arg}  grasp_check_enabled:={'true' if args.grasp_check_enabled else 'false'} \\
   gripper_state_topic:=/controller_manager/servo_states \\
   gripper_servo_id:=10 \\
   gripper_empty_close_position:=500 \\

@@ -14,6 +14,8 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Twist
 from interfaces.msg import ObjectsInfo
+from rclpy._rclpy_pybind11 import RCLError
+from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -35,15 +37,26 @@ except Exception:  # pragma: no cover - dry-run can still start without arm libs
     ServosPosition = None
 
 
+def normalize_angle(angle: float) -> float:
+    while angle > math.pi:
+        angle -= 2.0 * math.pi
+    while angle < -math.pi:
+        angle += 2.0 * math.pi
+    return angle
+
+
 class Phase(str, Enum):
     INIT = 'INIT'
     NAV_TO_MATERIAL = 'NAV_TO_MATERIAL'
     SEARCH_TARGET = 'SEARCH_TARGET'
     ALIGN_TARGET = 'ALIGN_TARGET'
     PICK = 'PICK'
+    ADVANCE_AFTER_PICK = 'ADVANCE_AFTER_PICK'
+    NAV_TO_FEED = 'NAV_TO_FEED'
     NAV_TO_PLACE = 'NAV_TO_PLACE'
     ALIGN_PLACE = 'ALIGN_PLACE'
     PLACE = 'PLACE'
+    RELEASE = 'RELEASE'
     NAV_HOME = 'NAV_HOME'
     DONE = 'DONE'
     FAILSAFE = 'FAILSAFE'
@@ -101,6 +114,14 @@ class PoseEstimate:
     robot_z: float
 
 
+@dataclass
+class OdomPose:
+    x: float
+    y: float
+    yaw: float
+    stamp: float
+
+
 class CompetitionPickPlace(Node):
     VALID_TARGETS = {'gray', 'grey', 'yellow', 'glass', 'grass', 'blue'}
     DEFAULT_TARGET_ALIASES = {
@@ -125,9 +146,11 @@ class CompetitionPickPlace(Node):
         self.depth_lock = threading.Lock()
         self.camera_info_lock = threading.Lock()
         self.servo_state_lock = threading.Lock()
+        self.odom_lock = threading.Lock()
         self.latest_detections: Dict[str, Detection] = {}
         self.latest_depth_msg: Optional[Image] = None
         self.latest_camera_k: Optional[List[float]] = None
+        self.latest_odom_pose: Optional[OdomPose] = None
         self.last_msg_time = 0.0
         self.last_depth_time = 0.0
         self.last_camera_info_time = 0.0
@@ -139,17 +162,42 @@ class CompetitionPickPlace(Node):
         self.last_servo_state_time = 0.0
 
         share_dir = get_package_share_directory('competition_pick_place')
-        self.declare_parameter('target_class', 'grass')
+        self.declare_parameter('target_class', 'gray')
         self.declare_parameter('target_sequence', '')
         self.declare_parameter('target_aliases', '')
-        self.declare_parameter('place_class', '')
+        self.declare_parameter('place_class', 'glass')
+        self.declare_parameter('feed_waypoint', 'feed_pose')
+        self.declare_parameter('post_feed_return_waypoint', 'material_standoff_pose')
+        self.declare_parameter('post_pick_advance_m', 0.20)
+        self.declare_parameter('post_pick_advance_speed', 0.08)
         self.declare_parameter('dry_run', True)
         self.declare_parameter('exit_on_done', False)
         self.declare_parameter('stop_after_pick', False)
         self.declare_parameter('use_nav', True)
         self.declare_parameter('use_arm', True)
+        self.declare_parameter('nav_mode', 'odom')
         self.declare_parameter('waypoints_yaml', os.path.join(share_dir, 'config', 'competition_waypoints.yaml'))
         self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('odom_topic', '/odom')
+        self.declare_parameter('odom_stale_seconds', 0.6)
+        self.declare_parameter('odom_wait_timeout', 10.0)
+        self.declare_parameter('odom_goal_tolerance_m', 0.045)
+        self.declare_parameter('odom_yaw_tolerance_rad', 0.10)
+        self.declare_parameter('odom_control_period', 0.05)
+        self.declare_parameter('odom_linear_k', 0.75)
+        self.declare_parameter('odom_angular_k', 1.60)
+        self.declare_parameter('odom_max_linear_speed', 0.16)
+        self.declare_parameter('odom_max_angular_speed', 0.45)
+        self.declare_parameter('post_pick_advance_use_odom', True)
+        self.declare_parameter('odom_material_x', 1.03)
+        self.declare_parameter('odom_material_y', -1.03)
+        self.declare_parameter('odom_material_yaw', -0.7853981633974483)
+        self.declare_parameter('odom_feed_x', 0.15)
+        self.declare_parameter('odom_feed_y', -1.07)
+        self.declare_parameter('odom_feed_yaw', 3.141592653589793)
+        self.declare_parameter('odom_return_x', 1.03)
+        self.declare_parameter('odom_return_y', -1.03)
+        self.declare_parameter('odom_return_yaw', -0.7853981633974483)
         self.declare_parameter('detection_topic', '/yolo_node/object_detect')
         self.declare_parameter('use_depth_distance', True)
         self.declare_parameter('depth_topic', '/ascamera/camera_publisher/depth0/image_raw')
@@ -225,6 +273,27 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('place_steps', '')
         self.declare_parameter('hold_after_place', True)
         self.declare_parameter('hold_place_steps', '1,2')
+        self.declare_parameter('l_shape_push_enabled', False)
+        self.declare_parameter('l_shape_push_pose', '518,196,176,597,500,335')
+        self.declare_parameter('l_shape_push_pose_action', 'horizontal')
+        self.declare_parameter('l_shape_push_pose_step', 1)
+        self.declare_parameter('l_shape_push_pose_duration', 1.0)
+        self.declare_parameter('l_shape_push_wrist_servo_index', 4)
+        self.declare_parameter('l_shape_push_wrist_position', 108)
+        self.declare_parameter('l_shape_push_gripper_position', -1)
+        self.declare_parameter('l_shape_push_distance_m', 0.05)
+        self.declare_parameter('l_shape_push_speed_mps', 0.04)
+        self.declare_parameter('l_shape_push_max_seconds', 2.0)
+        self.declare_parameter('l_shape_push_release_before', False)
+        self.declare_parameter('l_shape_push_close_after', True)
+        self.declare_parameter('l_shape_push_close_position', 500)
+        self.declare_parameter('l_shape_push_close_duration', 0.35)
+        self.declare_parameter('l_shape_push_lift_action', 'navigation_pick')
+        self.declare_parameter('l_shape_push_lift_steps', '5,6')
+        self.declare_parameter('release_action', '')
+        self.declare_parameter('release_gripper_position', 200)
+        self.declare_parameter('release_gripper_duration', 0.35)
+        self.declare_parameter('release_settle_seconds', 0.30)
         self.declare_parameter('pick_retry_attempts', 3)
         self.declare_parameter('grasp_check_enabled', True)
         self.declare_parameter('gripper_state_topic', '/controller_manager/servo_states')
@@ -266,6 +335,7 @@ class CompetitionPickPlace(Node):
         self.stop_after_pick = bool(self.get_parameter('stop_after_pick').value)
         self.use_nav = bool(self.get_parameter('use_nav').value)
         self.use_arm = bool(self.get_parameter('use_arm').value)
+        self.nav_mode = str(self.get_parameter('nav_mode').value).strip().lower()
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.min_score = float(self.get_parameter('min_score').value)
         self.stale_seconds = float(self.get_parameter('detection_stale_seconds').value)
@@ -277,6 +347,12 @@ class CompetitionPickPlace(Node):
         self.last_twist = Twist()
 
         self.cmd_pub = self.create_publisher(Twist, str(self.get_parameter('cmd_vel_topic').value), 1)
+        self.create_subscription(
+            Odometry,
+            str(self.get_parameter('odom_topic').value),
+            self.odom_callback,
+            qos_profile_sensor_data,
+        )
         self.create_subscription(
             ObjectsInfo,
             str(self.get_parameter('detection_topic').value),
@@ -309,7 +385,7 @@ class CompetitionPickPlace(Node):
         self.navigator = None
         self.arm_controller = None
         self.arm_ready_client = None
-        if self.use_nav and not self.dry_run:
+        if self.use_nav and not self.dry_run and self.nav_mode == 'nav2':
             if BasicNavigator is None:
                 raise RuntimeError('nav2_simple_commander is not available')
             self.navigator = BasicNavigator()
@@ -410,6 +486,23 @@ class CompetitionPickPlace(Node):
             self.last_camera_info_time = time.monotonic()
             self.camera_info_message_count += 1
 
+    def odom_callback(self, msg: Odometry) -> None:
+        position = msg.pose.pose.position
+        orientation = msg.pose.pose.orientation
+        yaw = self.yaw_from_quaternion(
+            float(orientation.x),
+            float(orientation.y),
+            float(orientation.z),
+            float(orientation.w),
+        )
+        with self.odom_lock:
+            self.latest_odom_pose = OdomPose(
+                x=float(position.x),
+                y=float(position.y),
+                yaw=yaw,
+                stamp=time.monotonic(),
+            )
+
     def servo_state_callback(self, msg) -> None:
         now = time.monotonic()
         positions: Dict[int, int] = {}
@@ -463,7 +556,7 @@ class CompetitionPickPlace(Node):
                     depth_tolerance=float(self.get_parameter('pick_depth_tolerance_m').value),
                 )
 
-                self.set_phase(Phase.PICK, f'{prefix}: running pick controller')
+                self.set_phase(Phase.PICK, f'{prefix}: running sr pick controller')
                 self.run_pick_controller(target_names, f'{target} pick')
                 if self.stop_after_pick:
                     self.stop_robot()
@@ -471,34 +564,44 @@ class CompetitionPickPlace(Node):
                     self.shutdown_if_requested()
                     return
 
-                self.set_phase(Phase.NAV_TO_PLACE, f'{prefix}: going to place standoff')
-                self.navigate_to('place_standoff_pose')
-
                 if self.place_class:
                     place_names = self.target_names_for(self.place_class)
-                    self.set_phase(Phase.ALIGN_PLACE, f'{prefix}: aligning place marker {sorted(place_names)}')
+                    self.set_phase(Phase.ALIGN_PLACE, f'{prefix}: aligning hold-place marker {sorted(place_names)}')
                     self.visual_servo_to_classes(
                         names=place_names,
                         timeout=float(self.get_parameter('place_align_timeout').value),
-                        target_area=float(self.get_parameter('pick_target_area_ratio').value),
-                        label='place marker',
+                        target_area=float(self.get_parameter('place_target_area_ratio').value),
+                        label=f'{target} hold-place marker',
                         target_robot_x=float(self.get_parameter('place_target_robot_x_m').value),
                         target_robot_y=float(self.get_parameter('place_target_robot_y_m').value),
                         robot_x_tolerance=float(self.get_parameter('place_robot_x_tolerance_m').value),
                         robot_y_tolerance=float(self.get_parameter('place_robot_y_tolerance_m').value),
                     )
                 else:
-                    self.get_logger().warn('place_class is empty; placement uses Nav2 standoff plus calibrated action group')
+                    self.get_logger().warn('place_class is empty; hold-place uses calibrated action group only')
 
-                self.set_phase(Phase.PLACE, f'{prefix}: running place action group')
-                place_steps = self.resolve_place_steps()
-                if place_steps:
-                    self.run_action_group_steps(str(self.get_parameter('place_action').value), place_steps, f'{target} place')
-                else:
-                    self.run_action_group(str(self.get_parameter('place_action').value), f'{target} place')
+                self.set_phase(Phase.PLACE, f'{prefix}: running hold-place action without release')
+                self.run_hold_place_action(str(self.get_parameter('place_action').value), f'{target} hold-place')
+                self.run_l_shape_push(f'{target} l-shape')
 
-            self.set_phase(Phase.NAV_HOME, 'returning home')
-            self.navigate_to('return_pose')
+                advance_m = float(self.get_parameter('post_pick_advance_m').value)
+                self.set_phase(Phase.ADVANCE_AFTER_PICK, f'{prefix}: advancing {advance_m:.3f}m')
+                self.drive_body_x(
+                    distance_m=advance_m,
+                    speed_mps=float(self.get_parameter('post_pick_advance_speed').value),
+                    label=f'{target} post-pick advance',
+                )
+
+                feed_waypoint = self.feed_waypoint_name()
+                self.set_phase(Phase.NAV_TO_FEED, f'{prefix}: going to feed waypoint {feed_waypoint}')
+                self.navigate_to(feed_waypoint)
+
+                self.set_phase(Phase.RELEASE, f'{prefix}: releasing gripper at feed waypoint')
+                self.release_payload(f'{target} release')
+
+                return_waypoint = self.post_feed_return_waypoint_name()
+                self.set_phase(Phase.NAV_HOME, f'{prefix}: returning to {return_waypoint}')
+                self.navigate_to(return_waypoint)
 
             self.stop_robot()
             self.set_phase(Phase.DONE, 'task completed')
@@ -509,16 +612,57 @@ class CompetitionPickPlace(Node):
             self.shutdown_if_requested()
 
     def validate_targets(self) -> None:
+        if self.nav_mode not in {'odom', 'nav2'}:
+            raise RuntimeError("nav_mode must be 'odom' or 'nav2'")
         invalid = [target for target in self.target_sequence if target not in self.VALID_TARGETS]
         if invalid:
             raise RuntimeError(f'targets must be in {sorted(self.VALID_TARGETS)}, got {invalid!r}')
         if not self.dry_run and self.use_nav:
-            for name in ('material_standoff_pose', 'place_standoff_pose', 'return_pose'):
+            if self.nav_mode == 'odom':
+                self.validate_odom_targets()
+                return
+            for name in self.required_navigation_waypoints():
                 pose = self.waypoints.get(name)
                 if not pose:
                     raise RuntimeError(f'missing waypoint: {name}')
-                if abs(float(pose.get('x', 0.0))) < 1e-6 and abs(float(pose.get('y', 0.0))) < 1e-6 and name != 'return_pose':
+                if abs(float(pose.get('x', 0.0))) < 1e-6 and abs(float(pose.get('y', 0.0))) < 1e-6:
                     raise RuntimeError(f'{name} is still [0, 0]; calibrate config/competition_waypoints.yaml first')
+
+    def validate_odom_targets(self) -> None:
+        for name in self.required_navigation_waypoints():
+            x, y, yaw = self.odom_target_for_waypoint(name)
+            if not all(math.isfinite(value) for value in (x, y, yaw)):
+                raise RuntimeError(f'odom target {name} contains non-finite values: {(x, y, yaw)!r}')
+
+    def required_navigation_waypoints(self) -> List[str]:
+        names = [
+            'material_standoff_pose',
+            self.feed_waypoint_name(),
+            self.post_feed_return_waypoint_name(),
+        ]
+        return self.unique_waypoint_names(names)
+
+    def feed_waypoint_name(self) -> str:
+        name = str(self.get_parameter('feed_waypoint').value).strip()
+        if not name:
+            raise RuntimeError('feed_waypoint is empty')
+        return name
+
+    def post_feed_return_waypoint_name(self) -> str:
+        name = str(self.get_parameter('post_feed_return_waypoint').value).strip()
+        if not name:
+            raise RuntimeError('post_feed_return_waypoint is empty')
+        return name
+
+    @staticmethod
+    def unique_waypoint_names(names: Iterable[str]) -> List[str]:
+        result: List[str] = []
+        seen = set()
+        for name in names:
+            if name and name not in seen:
+                seen.add(name)
+                result.append(name)
+        return result
 
     def wait_for_systems(self) -> None:
         if self.dry_run:
@@ -527,6 +671,9 @@ class CompetitionPickPlace(Node):
         if self.navigator is not None:
             self.get_logger().info('waiting for Nav2 active')
             self.navigator.waitUntilNav2Active()
+        if self.use_nav and self.nav_mode == 'odom':
+            self.get_logger().info('waiting for fresh /odom')
+            self.wait_for_fresh_odom('startup')
         if self.arm_ready_client is not None:
             self.get_logger().info('waiting for controller_manager/init_finish')
             if not self.arm_ready_client.wait_for_service(timeout_sec=12.0):
@@ -536,6 +683,17 @@ class CompetitionPickPlace(Node):
         if not self.use_nav:
             self.get_logger().warn(f'use_nav=false: skip waypoint {waypoint_name}')
             return
+        if self.nav_mode == 'odom':
+            x, y, yaw = self.odom_target_for_waypoint(waypoint_name)
+            if self.dry_run:
+                self.get_logger().info(
+                    f'dry-run odom navigation to {waypoint_name}: '
+                    f'x={x:.3f}, y={y:.3f}, yaw={yaw:.3f}'
+                )
+                return
+            self.navigate_to_odom_pose(x, y, yaw, waypoint_name)
+            return
+
         pose_data = self.waypoints.get(waypoint_name)
         if pose_data is None:
             raise RuntimeError(f'missing waypoint {waypoint_name}')
@@ -561,6 +719,121 @@ class CompetitionPickPlace(Node):
         if result != TaskResult.SUCCEEDED:
             raise RuntimeError(f'navigation failed at {waypoint_name}: {result}')
 
+    def odom_target_for_waypoint(self, waypoint_name: str) -> Tuple[float, float, float]:
+        if waypoint_name == 'material_standoff_pose':
+            return self.odom_target_from_prefix('odom_material')
+        if waypoint_name == self.feed_waypoint_name() or waypoint_name == 'feed_pose':
+            return self.odom_target_from_prefix('odom_feed')
+        if waypoint_name == 'return_pose':
+            return self.odom_target_from_prefix('odom_return')
+        if waypoint_name == self.post_feed_return_waypoint_name():
+            return self.odom_target_from_prefix('odom_return')
+
+        pose = self.waypoints.get(waypoint_name)
+        if pose is not None:
+            return (
+                float(pose.get('x', 0.0)),
+                float(pose.get('y', 0.0)),
+                float(pose.get('yaw', 0.0)),
+            )
+        raise RuntimeError(f'missing odom target for waypoint {waypoint_name}')
+
+    def odom_target_from_prefix(self, prefix: str) -> Tuple[float, float, float]:
+        return (
+            float(self.get_parameter(f'{prefix}_x').value),
+            float(self.get_parameter(f'{prefix}_y').value),
+            float(self.get_parameter(f'{prefix}_yaw').value),
+        )
+
+    def wait_for_fresh_odom(self, label: str) -> OdomPose:
+        timeout = max(0.1, float(self.get_parameter('odom_wait_timeout').value))
+        deadline = time.monotonic() + timeout
+        last_error = 'no odom received'
+        while rclpy.ok() and not self.shutdown_requested and time.monotonic() < deadline:
+            try:
+                return self.current_odom_pose()
+            except RuntimeError as exc:
+                last_error = str(exc)
+                time.sleep(0.05)
+        raise RuntimeError(f'{label}: fresh odom unavailable after {timeout:.1f}s ({last_error})')
+
+    def current_odom_pose(self) -> OdomPose:
+        with self.odom_lock:
+            pose = self.latest_odom_pose
+        if pose is None:
+            raise RuntimeError('no odom received')
+        age = time.monotonic() - pose.stamp
+        max_age = max(0.05, float(self.get_parameter('odom_stale_seconds').value))
+        if age > max_age:
+            raise RuntimeError(f'odom is stale: age={age:.2f}s')
+        return pose
+
+    def navigate_to_odom_pose(
+        self,
+        target_x: float,
+        target_y: float,
+        target_yaw: float,
+        label: str,
+        max_linear_speed: Optional[float] = None,
+    ) -> None:
+        pos_tol = max(0.005, float(self.get_parameter('odom_goal_tolerance_m').value))
+        yaw_tol = max(0.01, float(self.get_parameter('odom_yaw_tolerance_rad').value))
+        linear_k = max(0.0, float(self.get_parameter('odom_linear_k').value))
+        angular_k = max(0.0, float(self.get_parameter('odom_angular_k').value))
+        max_linear = max(0.01, float(self.get_parameter('odom_max_linear_speed').value))
+        if max_linear_speed is not None:
+            max_linear = min(max_linear, max(0.01, abs(float(max_linear_speed))))
+        max_angular = max(0.01, float(self.get_parameter('odom_max_angular_speed').value))
+        period = self.clamp(float(self.get_parameter('odom_control_period').value), 0.02, 0.5)
+        deadline = time.monotonic() + max(1.0, float(self.get_parameter('nav_timeout').value))
+
+        self.get_logger().info(
+            f'odom goal {label}: x={target_x:.3f}, y={target_y:.3f}, yaw={target_yaw:.3f}, '
+            f'pos_tol={pos_tol:.3f}, yaw_tol={yaw_tol:.3f}'
+        )
+        try:
+            while rclpy.ok() and not self.shutdown_requested:
+                pose = self.current_odom_pose()
+                dx = target_x - pose.x
+                dy = target_y - pose.y
+                distance = math.hypot(dx, dy)
+                yaw_error = normalize_angle(target_yaw - pose.yaw)
+                if distance <= pos_tol and abs(yaw_error) <= yaw_tol:
+                    self.get_logger().info(
+                        f'odom reached {label}: x={pose.x:.3f}, y={pose.y:.3f}, yaw={pose.yaw:.3f}, '
+                        f'distance_error={distance:.3f}, yaw_error={yaw_error:.3f}'
+                    )
+                    return
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f'odom navigation timeout at {label}: '
+                        f'distance_error={distance:.3f}, yaw_error={yaw_error:.3f}'
+                    )
+
+                twist = Twist()
+                if distance > pos_tol:
+                    cos_yaw = math.cos(pose.yaw)
+                    sin_yaw = math.sin(pose.yaw)
+                    body_x = cos_yaw * dx + sin_yaw * dy
+                    body_y = -sin_yaw * dx + cos_yaw * dy
+                    twist.linear.x = self.clamp(linear_k * body_x, -max_linear, max_linear)
+                    twist.linear.y = self.clamp(linear_k * body_y, -max_linear, max_linear)
+                    speed = math.hypot(twist.linear.x, twist.linear.y)
+                    if speed > max_linear:
+                        scale = max_linear / speed
+                        twist.linear.x *= scale
+                        twist.linear.y *= scale
+                if abs(yaw_error) > yaw_tol:
+                    twist.angular.z = self.clamp(angular_k * yaw_error, -max_angular, max_angular)
+
+                self.cmd_pub.publish(twist)
+                self.last_twist = twist
+                time.sleep(period)
+        finally:
+            self.stop_robot()
+        if self.shutdown_requested:
+            raise RuntimeError(f'stop requested during odom navigation to {label}')
+
     def make_pose(self, x: float, y: float, yaw: float) -> PoseStamped:
         pose = PoseStamped()
         pose.header.frame_id = self.map_frame
@@ -570,6 +843,12 @@ class CompetitionPickPlace(Node):
         pose.pose.orientation.z = math.sin(yaw * 0.5)
         pose.pose.orientation.w = math.cos(yaw * 0.5)
         return pose
+
+    @staticmethod
+    def yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        return math.atan2(siny_cosp, cosy_cosp)
 
     def visual_servo_to_classes(
         self,
@@ -1339,6 +1618,166 @@ class CompetitionPickPlace(Node):
 
         return []
 
+    def run_hold_place_action(self, action_name: str, label: str) -> None:
+        hold_steps = self.resolve_place_steps()
+        if hold_steps:
+            self.run_action_group_steps(action_name, hold_steps, label)
+            return
+        self.get_logger().warn(
+            f'{label}: no place_steps/hold_place_steps configured; skipping hold-place transition '
+            'to avoid releasing the gripper early'
+        )
+
+    def run_l_shape_push(self, label: str) -> None:
+        if not bool(self.get_parameter('l_shape_push_enabled').value):
+            self.get_logger().info(f'skip l-shape push {label}: disabled')
+            return
+
+        distance = max(0.0, float(self.get_parameter('l_shape_push_distance_m').value))
+        speed = max(0.0, float(self.get_parameter('l_shape_push_speed_mps').value))
+        max_seconds = max(0.05, float(self.get_parameter('l_shape_push_max_seconds').value))
+        duration = 0.0 if speed <= 1e-6 else min(max_seconds, distance / speed)
+        release_before = bool(self.get_parameter('l_shape_push_release_before').value)
+        close_after = bool(self.get_parameter('l_shape_push_close_after').value)
+        lift_action = str(self.get_parameter('l_shape_push_lift_action').value)
+        lift_steps = self.parse_step_indices(self.get_parameter('l_shape_push_lift_steps').value)
+
+        if self.dry_run:
+            self.get_logger().info(
+                f'dry-run l-shape push {label}: pose={self.l_shape_push_pose_description()} '
+                f'distance={distance:.3f}m speed={speed:.3f}m/s duration={duration:.3f}s '
+                f'release_before={release_before} close_after={close_after} '
+                f'lift_action={lift_action} lift_steps={list(lift_steps)}'
+            )
+            return
+        if not self.use_arm:
+            self.get_logger().warn(f'use_arm=false: skip {label} l-shape push')
+            return
+        if ServosPosition is None:
+            raise RuntimeError('servo_controller_msgs is not available')
+
+        self.stop_robot()
+        if release_before:
+            self.open_gripper_for_release(f'{label} release-before-push')
+            self.stop_robot()
+        push_row = self.resolve_l_shape_push_row(label)
+        self.get_logger().info(
+            f'run l-shape push {label}: pose={self.l_shape_push_pose_description()} '
+            f'row={self.format_action_row(push_row)} '
+            f'distance={distance:.3f}m speed={speed:.3f}m/s duration={duration:.3f}s '
+            f'release_before={release_before} close_after={close_after}'
+        )
+        self.publish_servo_row(push_row)
+        if distance > 1e-6 and speed > 1e-6:
+            self.run_blind_linear(f'{label} push', distance, speed, max_seconds)
+        if close_after:
+            self.publish_gripper_position(
+                f'{label} close',
+                float(self.get_parameter('l_shape_push_close_position').value),
+                float(self.get_parameter('l_shape_push_close_duration').value),
+            )
+            if lift_steps:
+                self.run_action_group_steps(lift_action, lift_steps, f'{label} lift')
+
+    def resolve_l_shape_push_row(self, label: str) -> List[int]:
+        pose_text = str(self.get_parameter('l_shape_push_pose').value).strip()
+        duration_ms = int(round(max(0.05, float(self.get_parameter('l_shape_push_pose_duration').value)) * 1000.0))
+        if pose_text:
+            parts = [part.strip() for part in pose_text.split(',') if part.strip()]
+            if len(parts) != 6:
+                raise RuntimeError(f'{label}: l_shape_push_pose must contain 6 servo values, got {pose_text!r}')
+            try:
+                values = [int(round(float(part))) for part in parts]
+            except ValueError as exc:
+                raise RuntimeError(f'{label}: invalid l_shape_push_pose {pose_text!r}') from exc
+            row = [0, duration_ms, *values]
+        else:
+            action = str(self.get_parameter('l_shape_push_pose_action').value)
+            step = int(self.get_parameter('l_shape_push_pose_step').value)
+            rows = self.load_action_group_rows(action)
+            selected = [row for row in rows if int(row[0]) == step]
+            if not selected:
+                available = [int(row[0]) for row in rows]
+                raise RuntimeError(f'{label}: l-shape pose step {step} not in {action}; available={available}')
+            row = list(selected[0])
+            row[1] = duration_ms
+
+        wrist_position = float(self.get_parameter('l_shape_push_wrist_position').value)
+        wrist_index = int(self.get_parameter('l_shape_push_wrist_servo_index').value)
+        if wrist_position >= 0.0:
+            if wrist_index < 1 or wrist_index > 5:
+                raise RuntimeError(f'{label}: l_shape_push_wrist_servo_index must be 1..5, got {wrist_index}')
+            row[1 + wrist_index] = int(round(wrist_position))
+
+        gripper_override = float(self.get_parameter('l_shape_push_gripper_position').value)
+        if gripper_override >= 0.0:
+            row[7] = int(round(gripper_override))
+        return row
+
+    def l_shape_push_pose_description(self) -> str:
+        pose_text = str(self.get_parameter('l_shape_push_pose').value).strip()
+        if pose_text:
+            return f'custom[{pose_text}]'
+        return (
+            f"{self.get_parameter('l_shape_push_pose_action').value}"
+            f":step{int(self.get_parameter('l_shape_push_pose_step').value)}"
+            f":wrist{int(self.get_parameter('l_shape_push_wrist_servo_index').value)}="
+            f"{int(float(self.get_parameter('l_shape_push_wrist_position').value))}"
+        )
+
+    @staticmethod
+    def format_action_row(row: Sequence[int]) -> str:
+        if len(row) < 8:
+            return repr(row)
+        return (
+            f't={int(row[1])}ms '
+            f's1={int(row[2])} s2={int(row[3])} s3={int(row[4])} '
+            f's4={int(row[5])} s5={int(row[6])} gripper={int(row[7])}'
+        )
+
+    def run_blind_linear(self, label: str, distance: float, speed: float, max_seconds: float) -> None:
+        duration = min(max_seconds, distance / speed)
+        signed_speed = float(self.get_parameter('linear_sign').value) * speed
+        twist = Twist()
+        twist.linear.x = math.copysign(abs(signed_speed), distance)
+        self.stop_robot()
+        self.get_logger().info(
+            f'blind linear {label}: distance={distance:.3f}m '
+            f'speed={twist.linear.x:.3f}m/s duration={duration:.3f}s'
+        )
+        deadline = time.monotonic() + duration
+        try:
+            while rclpy.ok() and not self.shutdown_requested and time.monotonic() < deadline:
+                self.cmd_pub.publish(twist)
+                self.last_twist = twist
+                time.sleep(0.03)
+        finally:
+            self.stop_robot()
+        if self.shutdown_requested:
+            raise RuntimeError('stop requested during l-shape push')
+
+    def publish_gripper_position(self, label: str, position: float, duration: float) -> None:
+        if not self.use_arm:
+            self.get_logger().warn(f'use_arm=false: skip gripper position for {label}')
+            return
+        if self.dry_run:
+            self.get_logger().info(f'dry-run gripper {label}: position={position:.0f} duration={duration:.2f}s')
+            return
+        if ServosPosition is None:
+            raise RuntimeError('servo_controller_msgs is not available')
+        if self.arm_controller is None:
+            raise RuntimeError('arm controller is not initialized')
+        msg = ServosPosition()
+        msg.position_unit = 'pulse'
+        msg.duration = max(0.05, float(duration))
+        msg.position = [
+            self.make_servo_position(int(self.get_parameter('gripper_servo_id').value), position)
+        ]
+        self.stop_robot()
+        self.get_logger().info(f'gripper {label}: position={position:.0f} duration={msg.duration:.2f}s')
+        self.arm_controller.servo_controller_pub.publish(msg)
+        time.sleep(msg.duration)
+
     def grasp_succeeded(self, label: str) -> bool:
         if not bool(self.get_parameter('grasp_check_enabled').value):
             self.get_logger().info(f'{label}: grasp check disabled; assuming success')
@@ -1684,6 +2123,90 @@ class CompetitionPickPlace(Node):
         self.arm_controller.run_action(action_name)
         time.sleep(0.3)
 
+    def release_payload(self, label: str) -> None:
+        release_action = str(self.get_parameter('release_action').value).strip()
+        if release_action:
+            self.run_action_group(release_action, label)
+            return
+        self.open_gripper_for_release(label)
+
+    def open_gripper_for_release(self, label: str) -> None:
+        self.open_gripper_to_position(
+            position=float(self.get_parameter('release_gripper_position').value),
+            duration=max(0.05, float(self.get_parameter('release_gripper_duration').value)),
+            settle=max(0.0, float(self.get_parameter('release_settle_seconds').value)),
+            label=label,
+        )
+
+    def open_gripper_to_position(self, position: float, duration: float, settle: float, label: str) -> None:
+        if not self.use_arm:
+            self.get_logger().warn(f'use_arm=false: skip {label} gripper command')
+            return
+        if self.dry_run:
+            self.get_logger().info(
+                f'dry-run {label}: gripper id={int(self.get_parameter("gripper_servo_id").value)} '
+                f'position={position:.0f}, duration={duration:.2f}s'
+            )
+            return
+        if ServosPosition is None:
+            raise RuntimeError('servo_controller_msgs is not available')
+        if self.arm_controller is None:
+            raise RuntimeError('arm controller is not initialized')
+
+        msg = ServosPosition()
+        msg.position_unit = 'pulse'
+        msg.duration = duration
+        msg.position = [self.make_servo_position(int(self.get_parameter('gripper_servo_id').value), position)]
+        self.stop_robot()
+        self.get_logger().info(f'{label}: gripper position={position:.0f}, duration={duration:.2f}s')
+        self.arm_controller.servo_controller_pub.publish(msg)
+        time.sleep(duration + settle)
+
+    def drive_body_x(self, distance_m: float, speed_mps: float, label: str) -> None:
+        distance = float(distance_m)
+        if abs(distance) < 1e-6:
+            self.get_logger().info(f'{label}: post-pick advance distance is zero; skip')
+            return
+        speed = abs(float(speed_mps))
+        if speed < 1e-4:
+            raise RuntimeError(f'{label}: post_pick_advance_speed must be positive')
+        duration = abs(distance) / speed
+        if self.dry_run:
+            self.get_logger().info(f'dry-run {label}: drive x={distance:.3f}m speed={speed:.3f}m/s duration={duration:.2f}s')
+            return
+        if self.nav_mode == 'odom' and bool(self.get_parameter('post_pick_advance_use_odom').value):
+            self.drive_body_x_odom(distance, speed, label)
+            return
+
+        twist = Twist()
+        twist.linear.x = math.copysign(speed, distance)
+        self.get_logger().info(f'{label}: drive x={distance:.3f}m speed={twist.linear.x:.3f}m/s duration={duration:.2f}s')
+        deadline = time.monotonic() + duration
+        try:
+            while rclpy.ok() and not self.shutdown_requested and time.monotonic() < deadline:
+                self.cmd_pub.publish(twist)
+                time.sleep(0.05)
+        finally:
+            self.stop_robot()
+        if self.shutdown_requested:
+            raise RuntimeError('stop requested during post-pick advance')
+
+    def drive_body_x_odom(self, distance_m: float, speed_mps: float, label: str) -> None:
+        start = self.current_odom_pose()
+        target_x = start.x + float(distance_m) * math.cos(start.yaw)
+        target_y = start.y + float(distance_m) * math.sin(start.yaw)
+        self.get_logger().info(
+            f'{label}: odom body-x advance from x={start.x:.3f}, y={start.y:.3f}, yaw={start.yaw:.3f} '
+            f'to x={target_x:.3f}, y={target_y:.3f}, yaw={start.yaw:.3f}'
+        )
+        self.navigate_to_odom_pose(
+            target_x,
+            target_y,
+            start.yaw,
+            label,
+            max_linear_speed=abs(float(speed_mps)),
+        )
+
     def stop_robot(self) -> None:
         if not rclpy.ok():
             return
@@ -1753,6 +2276,10 @@ def main(args=None) -> None:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except RCLError as exc:
+        message = str(exc)
+        if rclpy.ok() or 'context is not valid' not in message:
+            raise
     finally:
         node.shutdown_requested = True
         if rclpy.ok():

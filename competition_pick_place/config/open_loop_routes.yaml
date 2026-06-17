@@ -1,0 +1,42 @@
+# Open-loop fallback routes for the competition field.
+# Coordinates are in the same map frame used by the RViz screenshots.
+# These routes intentionally do not use Nav2 localization.
+
+defaults:
+  drive_mode: face_target
+  linear_speed: 0.60
+  angular_speed: 0.80
+  distance_scale: 1.0
+  angle_scale: 1.0
+  max_segment_seconds: 5.0
+  start_delay: 0.6
+
+segments:
+  start_to_pick:
+    description: Tuned route from initial pose to the working grasp position.
+    start_x: 0.0
+    start_y: 0.0
+    start_yaw: 0.0
+    end_x: 1.03
+    end_y: -1.03
+
+  pick_to_second_target:
+    description: Route from nominal grasp position to the second target point, ending 180 degrees from initial heading.
+    # If MPC grasp servoing moves the chassis, pass that displacement to
+    # tools/run_open_loop_route.py with --start-delta-* instead of editing this
+    # nominal start pose every time.
+    start_x: 1.03
+    start_y: -1.03
+    start_yaw: -0.7853981633974483
+    end_x: 0.15
+    end_y: -1.07
+    end_yaw: 3.141592653589793
+
+routes:
+  to_pick:
+    - start_to_pick
+  pick_to_second_target:
+    - pick_to_second_target
+  full_without_grasp:
+    - start_to_pick
+    - pick_to_second_target

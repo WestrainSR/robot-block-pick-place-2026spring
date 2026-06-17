@@ -11,6 +11,7 @@ logs/
 # The robot keeps the original factory packages; this snapshot is not required
 # for rebuilding our competition package.
 robot_sources_subset/
+robot_remote_architecture/
 
 # Python/ROS build products
 __pycache__/

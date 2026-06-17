@@ -15,6 +15,11 @@ place_standoff_pose:
   y: 0.0
   yaw: 0.0
 
+feed_pose:
+  x: 0.0
+  y: 0.0
+  yaw: 0.0
+
 return_pose:
   x: 0.0
   y: 0.0
