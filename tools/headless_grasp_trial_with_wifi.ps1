@@ -26,6 +26,7 @@ param(
     [string]$LShapePushPoseAction = 'horizontal',
     [int]$LShapePushPoseStep = 1,
     [double]$LShapePushPoseDuration = 1.0,
+    [string]$LShapePushServoOrder = '5,4,3,2,1',
     [int]$LShapePushWristServoIndex = 4,
     [int]$LShapePushWristPosition = 108,
     [int]$LShapePushGripperPosition = -1,
@@ -129,8 +130,8 @@ try {
     Wait-RobotPing
 
     Write-Host "Running headless grasp trial for $TargetClass..."
-    Write-Host ("L-shape push: enabled={0}, pose_action={1}, pose_step={2}, wrist{3}={4}, gripper={5}, distance={6}m, speed={7}m/s, max={8}s, close_after={9}" -f `
-        $lShapePushEnabledValue, $LShapePushPoseAction, $LShapePushPoseStep, $LShapePushWristServoIndex, $LShapePushWristPosition, $LShapePushGripperPosition, `
+    Write-Host ("L-shape push: enabled={0}, pose_action={1}, pose_step={2}, servo_order={3}, wrist{4}={5}, gripper={6}, distance={7}m, speed={8}m/s, max={9}s, close_after={10}" -f `
+        $lShapePushEnabledValue, $LShapePushPoseAction, $LShapePushPoseStep, $LShapePushServoOrder, $LShapePushWristServoIndex, $LShapePushWristPosition, $LShapePushGripperPosition, `
         $LShapePushDistance, $LShapePushSpeed, $LShapePushMaxSeconds, $lShapePushCloseAfterValue)
     $holdPlaceStepsArg = ($HoldPlaceSteps -join ',').Trim()
     $placePickStepsArg = ($PlacePickSteps -join ',').Trim()
@@ -160,6 +161,7 @@ try {
         '--l-shape-push-pose-action', $LShapePushPoseAction,
         '--l-shape-push-pose-step', "$LShapePushPoseStep",
         '--l-shape-push-pose-duration', "$LShapePushPoseDuration",
+        '--l-shape-push-servo-order', $LShapePushServoOrder,
         '--l-shape-push-wrist-servo-index', "$LShapePushWristServoIndex",
         '--l-shape-push-wrist-position', "$LShapePushWristPosition",
         '--l-shape-push-gripper-position', "$LShapePushGripperPosition",

@@ -152,6 +152,7 @@ def launch_setup(context):
     l_shape_push_pose_action = LaunchConfiguration('l_shape_push_pose_action')
     l_shape_push_pose_step = LaunchConfiguration('l_shape_push_pose_step')
     l_shape_push_pose_duration = LaunchConfiguration('l_shape_push_pose_duration')
+    l_shape_push_servo_order = LaunchConfiguration('l_shape_push_servo_order')
     l_shape_push_wrist_servo_index = LaunchConfiguration('l_shape_push_wrist_servo_index')
     l_shape_push_wrist_position = LaunchConfiguration('l_shape_push_wrist_position')
     l_shape_push_gripper_position = LaunchConfiguration('l_shape_push_gripper_position')
@@ -343,6 +344,7 @@ def launch_setup(context):
                 'l_shape_push_pose_action': l_shape_push_pose_action,
                 'l_shape_push_pose_step': ParameterValue(l_shape_push_pose_step, value_type=int),
                 'l_shape_push_pose_duration': ParameterValue(l_shape_push_pose_duration, value_type=float),
+                'l_shape_push_servo_order': l_shape_push_servo_order,
                 'l_shape_push_wrist_servo_index': ParameterValue(l_shape_push_wrist_servo_index, value_type=int),
                 'l_shape_push_wrist_position': ParameterValue(l_shape_push_wrist_position, value_type=int),
                 'l_shape_push_gripper_position': ParameterValue(l_shape_push_gripper_position, value_type=int),
@@ -525,6 +527,7 @@ def generate_launch_description():
         DeclareLaunchArgument('l_shape_push_pose_action', default_value='horizontal'),
         DeclareLaunchArgument('l_shape_push_pose_step', default_value='1'),
         DeclareLaunchArgument('l_shape_push_pose_duration', default_value='1.0'),
+        DeclareLaunchArgument('l_shape_push_servo_order', default_value='5,4,3,2,1'),
         DeclareLaunchArgument('l_shape_push_wrist_servo_index', default_value='4'),
         DeclareLaunchArgument('l_shape_push_wrist_position', default_value='108'),
         DeclareLaunchArgument('l_shape_push_gripper_position', default_value='-1'),

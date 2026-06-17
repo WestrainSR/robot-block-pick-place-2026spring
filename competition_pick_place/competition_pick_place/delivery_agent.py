@@ -92,6 +92,7 @@ def parse_args(args=None):
     parser.add_argument('--l-shape-push-pose-action', default='horizontal')
     parser.add_argument('--l-shape-push-pose-step', default='1')
     parser.add_argument('--l-shape-push-pose-duration', default='1.0')
+    parser.add_argument('--l-shape-push-servo-order', default='5,4,3,2,1')
     parser.add_argument('--l-shape-push-wrist-servo-index', default='4')
     parser.add_argument('--l-shape-push-wrist-position', default='108')
     parser.add_argument('--l-shape-push-gripper-position', default='-1')
@@ -185,6 +186,7 @@ def launch_command(args) -> List[str]:
         'l_shape_push_pose_action': args.l_shape_push_pose_action,
         'l_shape_push_pose_step': args.l_shape_push_pose_step,
         'l_shape_push_pose_duration': args.l_shape_push_pose_duration,
+        'l_shape_push_servo_order': args.l_shape_push_servo_order,
         'l_shape_push_wrist_servo_index': args.l_shape_push_wrist_servo_index,
         'l_shape_push_wrist_position': args.l_shape_push_wrist_position,
         'l_shape_push_gripper_position': args.l_shape_push_gripper_position,
@@ -283,6 +285,7 @@ class DeliveryAgent:
             '  l_shape_push='
             f'enabled={self.args.l_shape_push_enabled}, '
             f'pose={l_shape_pose}, '
+            f'servo_order={self.args.l_shape_push_servo_order}, '
             f'wrist{self.args.l_shape_push_wrist_servo_index}={self.args.l_shape_push_wrist_position}, '
             f'gripper={self.args.l_shape_push_gripper_position}, '
             f'distance={self.args.l_shape_push_distance}, speed={self.args.l_shape_push_speed}, '

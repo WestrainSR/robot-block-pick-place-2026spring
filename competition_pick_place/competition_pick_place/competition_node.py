@@ -278,6 +278,7 @@ class CompetitionPickPlace(Node):
         self.declare_parameter('l_shape_push_pose_action', 'horizontal')
         self.declare_parameter('l_shape_push_pose_step', 1)
         self.declare_parameter('l_shape_push_pose_duration', 1.0)
+        self.declare_parameter('l_shape_push_servo_order', '5,4,3,2,1')
         self.declare_parameter('l_shape_push_wrist_servo_index', 4)
         self.declare_parameter('l_shape_push_wrist_position', 108)
         self.declare_parameter('l_shape_push_gripper_position', -1)
@@ -1667,7 +1668,7 @@ class CompetitionPickPlace(Node):
             f'distance={distance:.3f}m speed={speed:.3f}m/s duration={duration:.3f}s '
             f'release_before={release_before} close_after={close_after}'
         )
-        self.publish_servo_row(push_row)
+        self.publish_l_shape_push_pose(push_row, label)
         if distance > 1e-6 and speed > 1e-6:
             self.run_blind_linear(f'{label} push', distance, speed, max_seconds)
         if close_after:
@@ -1713,6 +1714,53 @@ class CompetitionPickPlace(Node):
         if gripper_override >= 0.0:
             row[7] = int(round(gripper_override))
         return row
+
+    def parse_servo_order(self, value, label: str) -> List[int]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(',') if part.strip()]
+        else:
+            parts = [str(part).strip() for part in value if str(part).strip()]
+        result: List[int] = []
+        seen = set()
+        for part in parts:
+            try:
+                servo_id = int(part)
+            except ValueError as exc:
+                raise RuntimeError(f'{label}: invalid servo id in l_shape_push_servo_order: {part!r}') from exc
+            if servo_id not in {1, 2, 3, 4, 5, 10}:
+                raise RuntimeError(f'{label}: l_shape_push_servo_order only supports 1..5 and 10, got {servo_id}')
+            if servo_id in seen:
+                continue
+            seen.add(servo_id)
+            result.append(servo_id)
+        return result
+
+    def publish_l_shape_push_pose(self, row: Sequence[int], label: str) -> None:
+        order = self.parse_servo_order(self.get_parameter('l_shape_push_servo_order').value, label)
+        if not order:
+            self.publish_servo_row(row)
+            return
+        row_by_servo = {
+            1: row[2],
+            2: row[3],
+            3: row[4],
+            4: row[5],
+            5: row[6],
+            10: row[7],
+        }
+        duration = max(0.05, float(row[1]) / 1000.0)
+        self.get_logger().info(
+            f'{label}: l-shape pose servo order={order} duration_each={duration:.3f}s'
+        )
+        for servo_id in order:
+            self.publish_single_servo_position(
+                servo_id,
+                float(row_by_servo[servo_id]),
+                duration,
+                f'{label} l-shape servo {servo_id}',
+            )
 
     def l_shape_push_pose_description(self) -> str:
         pose_text = str(self.get_parameter('l_shape_push_pose').value).strip()
@@ -2098,6 +2146,19 @@ class CompetitionPickPlace(Node):
         self.arm_controller.servo_controller_pub.publish(msg)
         if wait:
             time.sleep(msg.duration)
+
+    def publish_single_servo_position(self, servo_id: int, position: float, duration: float, label: str) -> None:
+        if ServosPosition is None:
+            raise RuntimeError('servo_controller_msgs is not available')
+        msg = ServosPosition()
+        msg.position_unit = 'pulse'
+        msg.duration = max(0.05, float(duration))
+        msg.position = [self.make_servo_position(servo_id, position)]
+        if self.arm_controller is None:
+            raise RuntimeError('arm controller is not initialized')
+        self.get_logger().info(f'{label}: servo={servo_id} position={position:.0f} duration={msg.duration:.3f}s')
+        self.arm_controller.servo_controller_pub.publish(msg)
+        time.sleep(msg.duration)
 
     def make_servo_position(self, servo_id: int, position: float):
         try:

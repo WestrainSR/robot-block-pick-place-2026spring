@@ -58,6 +58,7 @@ def parse_args():
     parser.add_argument('--l-shape-push-pose-action', default='horizontal')
     parser.add_argument('--l-shape-push-pose-step', type=int, default=1)
     parser.add_argument('--l-shape-push-pose-duration', type=float, default=1.0)
+    parser.add_argument('--l-shape-push-servo-order', default='5,4,3,2,1')
     parser.add_argument('--l-shape-push-wrist-servo-index', type=int, default=4)
     parser.add_argument('--l-shape-push-wrist-position', type=int, default=108)
     parser.add_argument('--l-shape-push-gripper-position', type=int, default=-1)
@@ -464,11 +465,38 @@ ensure_camera() {{
   return 1
 }}
 
+controller_ready() {{
+  timeout 4s ros2 service call /controller_manager/init_finish std_srvs/srv/Trigger "{{}}" >/dev/null 2>&1
+}}
+
+ensure_controller() {{
+  if controller_ready; then
+    echo controller_ready=1 | tee -a "$DEBUG_DIR/session.log"
+    return 0
+  fi
+  for attempt in 1 2; do
+    nohup ros2 launch controller controller.launch.py >> "$DEBUG_DIR/controller.log" 2>&1 &
+    echo controller_pid=$! attempt=$attempt | tee -a "$DEBUG_DIR/session.log"
+    for i in $(seq 1 25); do
+      if controller_ready; then
+        echo controller_ready=1 attempt=$attempt wait_seconds=$i | tee -a "$DEBUG_DIR/session.log"
+        return 0
+      fi
+      sleep 1
+    done
+    echo controller_attempt_${{attempt}}_failed=1 | tee -a "$DEBUG_DIR/session.log"
+  done
+  echo controller_ready=0 | tee -a "$DEBUG_DIR/session.log"
+  return 1
+}}
+
 echo "session_start=$(date '+%F %T')" | tee "$DEBUG_DIR/session.log"
 stop_ours
 sleep 1
 ensure_camera
 CAMERA_RC=$?
+ensure_controller
+CONTROLLER_RC=$?
 python3 -u "$DEBUG_DIR/recorder.py" --out-dir "$DEBUG_DIR" --target {q(args.target_class)} --period {args.snapshot_period:.3f} --camera-tilt {args.camera_tilt_deg:.3f} --camera-height {args.camera_height:.3f} --camera-offset-x {args.camera_offset_x:.3f} --roi-pixels {int(args.depth_roi_pixels)} > "$DEBUG_DIR/recorder.log" 2>&1 &
 REC_PID=$!
 echo recorder_pid=$REC_PID | tee -a "$DEBUG_DIR/session.log"
@@ -557,6 +585,7 @@ ros2 launch competition_pick_place competition_run.launch.py \\
 {l_shape_push_pose_arg}  l_shape_push_pose_action:={q(args.l_shape_push_pose_action)} \\
   l_shape_push_pose_step:={int(args.l_shape_push_pose_step)} \\
   l_shape_push_pose_duration:={args.l_shape_push_pose_duration:.3f} \\
+  l_shape_push_servo_order:={q(args.l_shape_push_servo_order)} \\
   l_shape_push_wrist_servo_index:={int(args.l_shape_push_wrist_servo_index)} \\
   l_shape_push_wrist_position:={int(args.l_shape_push_wrist_position)} \\
   l_shape_push_gripper_position:={int(args.l_shape_push_gripper_position)} \\
@@ -611,7 +640,7 @@ echo frame_count=$(ls "$DEBUG_DIR"/frame_*.jpg 2>/dev/null | wc -l) | tee -a "$D
 echo detection_rows=$(($(wc -l < "$DEBUG_DIR/detections.csv" 2>/dev/null || echo 1)-1)) | tee -a "$DEBUG_DIR/session.log"
 tar -czf "$TAR_PATH" -C "$(dirname "$DEBUG_DIR")" "$(basename "$DEBUG_DIR")"
 echo tar_path="$TAR_PATH"
-[ "$CAMERA_RC" = 0 ] && [ "$STATUS" = done ]
+[ "$CAMERA_RC" = 0 ] && [ "$CONTROLLER_RC" = 0 ] && [ "$STATUS" = done ]
 '''
 
 
